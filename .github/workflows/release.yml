@@ -58,17 +58,19 @@ jobs:
           go build -trimpath -o "dist/fvremote-client${SUF}" ./cmd/client
           ls -lh dist
 
-      - name: Package
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          cd dist
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -j "../${{ matrix.asset }}.zip" fvremote-server.exe fvremote-client.exe
-          else
-            tar -czf "../${{ matrix.asset }}.tar.gz" fvremote-server fvremote-client
-          fi
-          cd ..
+          tar -czf "${{ matrix.asset }}.tar.gz" -C dist fvremote-server fvremote-client
           ls -lh "${{ matrix.asset }}".*
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/fvremote-server.exe, dist/fvremote-client.exe -DestinationPath "${{ matrix.asset }}.zip"
+          Get-Item "${{ matrix.asset }}.zip" | Format-List
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
