@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            asset: fvremote-linux-amd64
+          - os: windows-latest
+            goos: windows
+            asset: fvremote-windows-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxtst-dev libx11-dev libxrandr-dev libxcursor-dev libxinerama-dev \
+            libxi-dev libxfixes-dev libwayland-dev wayland-protocols libdecor-0-dev
+
+      - name: Download modules
+        shell: bash
+        run: go mod download
+
+      - name: Build
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          mkdir -p dist
+          SUF=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then SUF=".exe"; fi
+          go build -trimpath -o "dist/fvremote-server${SUF}" ./cmd/server
+          go build -trimpath -o "dist/fvremote-client${SUF}" ./cmd/client
+          ls -lh dist
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -j "../${{ matrix.asset }}.zip" fvremote-server.exe fvremote-client.exe
+          else
+            tar -czf "../${{ matrix.asset }}.tar.gz" fvremote-server fvremote-client
+          fi
+          cd ..
+          ls -lh "${{ matrix.asset }}".*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.*
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
