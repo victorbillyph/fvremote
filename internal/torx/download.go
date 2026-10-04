@@ -1,4 +1,4 @@
-package tor
+package torx
 
 import (
 	"archive/tar"
@@ -14,47 +14,41 @@ import (
 	"github.com/victorbillyph/fvremote/internal/config"
 )
 
-// torVersion fixa a versão do Tor baixada. O bundle "expert" é publicado para
-// todas as plataformas e contém o binário tor (e geoip), sem navegador.
-const torVersion = "13.5.7"
+// torVersion é a versão do bundle "expert" do Tor baixada pelo app.
+const torVersion = "15.0.24"
 
 func detect() (goos, arch string) {
 	goos = runtime.GOOS
 	arch = runtime.GOARCH
-	// normaliza nomes usados nos arquivos do Tor Project
-	if arch == "arm64" {
+	switch arch {
+	case "arm64":
 		arch = "aarch64"
+	case "amd64":
+		arch = "x86_64"
 	}
 	return
 }
 
-// candidateURLs retorna URLs possíveis para o bundle do Tor na plataforma.
 func candidateURLs(goos, arch string) []string {
 	base := "https://dist.torproject.org/torbrowser/" + torVersion
+	file := func(os, a string) string {
+		return fmt.Sprintf("%s/tor-expert-bundle-%s-%s-%s.tar.gz", base, os, a, torVersion)
+	}
 	switch goos {
 	case "windows":
-		return []string{
-			fmt.Sprintf("%s/tor-expert-bundle-windows-x86_64-%s.tar.gz", base, torVersion),
-			fmt.Sprintf("%s/tor-expert-bundle-windows-%s-%s.tar.gz", base, arch, torVersion),
-		}
+		return []string{file("windows", arch), file("windows", "x86_64")}
 	case "linux":
-		return []string{
-			fmt.Sprintf("%s/tor-expert-bundle-linux-%s-%s.tar.gz", base, arch, torVersion),
-			fmt.Sprintf("%s/tor-expert-bundle-linux-%s-%s.tar.gz", base, runtime.GOARCH, torVersion),
-		}
+		return []string{file("linux", arch), file("linux", "x86_64")}
 	case "darwin":
-		return []string{
-			fmt.Sprintf("%s/tor-expert-bundle-macos-%s-%s.tar.gz", base, arch, torVersion),
-			fmt.Sprintf("%s/tor-expert-bundle-macos-x86_64-%s.tar.gz", base, torVersion),
-		}
+		return []string{file("macos", arch), file("macos", "x86_64")}
 	default:
 		return nil
 	}
 }
 
 // Ensure baixa e extrai o Tor standalone apenas se ainda não existir.
-// O binário fica exclusivamente em config.TorDir().
-func Ensure() error {
+// O conteúdo fica exclusivamente em config.TorDir().
+func Ensure(progress func(int64, int64)) error {
 	if _, err := os.Stat(config.TorBin()); err == nil {
 		_ = os.Chmod(config.TorBin(), 0o755)
 		return nil
@@ -75,7 +69,7 @@ func Ensure() error {
 	tmp := filepath.Join(os.TempDir(), "fvremote-tor.tar.gz")
 	var lastErr error
 	for _, u := range urls {
-		if err := download(u, tmp); err != nil {
+		if err := download(u, tmp, progress); err != nil {
 			lastErr = err
 			continue
 		}
@@ -94,7 +88,7 @@ func Ensure() error {
 	return fmt.Errorf("falha ao obter tor standalone: %v", lastErr)
 }
 
-func download(url, dst string) error {
+func download(url, dst string, progress func(int64, int64)) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -113,11 +107,31 @@ func download(url, dst string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	total := resp.ContentLength
+	var written int64
+	buf := make([]byte, 128*1024)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := f.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			written += int64(n)
+			if progress != nil {
+				progress(written, total)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// extractTarGz extrai o conteúdo do bundle, removendo o prefixo "tor/".
+// extractTarGz extrai o bundle removendo o prefixo "tor/".
 func extractTarGz(src, out string) error {
 	f, err := os.Open(src)
 	if err != nil {
@@ -146,7 +160,6 @@ func extractTarGz(src, out string) error {
 		if name == "" || strings.HasPrefix(name, "..") {
 			continue
 		}
-		// ignora transportes plugáveis pesados que não são necessários
 		if strings.HasPrefix(name, "pluggable_transports/") {
 			continue
 		}
@@ -163,7 +176,9 @@ func extractTarGz(src, out string) error {
 			return err
 		}
 		w.Close()
-		_ = os.Chmod(dst, 0o755)
+		if strings.HasSuffix(name, "tor") || strings.HasSuffix(name, "tor.exe") {
+			_ = os.Chmod(dst, 0o755)
+		}
 	}
 	return nil
 }

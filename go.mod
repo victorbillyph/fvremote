@@ -3,6 +3,7 @@ module github.com/victorbillyph/fvremote
 go 1.26.0
 
 require (
+	filippo.io/edwards25519 v1.2.0
 	fyne.io/fyne/v2 v2.8.1
 	github.com/go-vgo/robotgo v1.2.1
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018

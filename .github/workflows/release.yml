@@ -54,22 +54,21 @@ jobs:
           mkdir -p dist
           SUF=""
           if [ "${{ matrix.goos }}" = "windows" ]; then SUF=".exe"; fi
-          go build -trimpath -o "dist/fvremote-server${SUF}" ./cmd/server
-          go build -trimpath -o "dist/fvremote-client${SUF}" ./cmd/client
+          go build -trimpath -o "dist/fvremote${SUF}" ./cmd/fvremote
           ls -lh dist
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          tar -czf "${{ matrix.asset }}.tar.gz" -C dist fvremote-server fvremote-client
+          tar -czf "${{ matrix.asset }}.tar.gz" -C dist fvremote
           ls -lh "${{ matrix.asset }}".*
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/fvremote-server.exe, dist/fvremote-client.exe -DestinationPath "${{ matrix.asset }}.zip"
+          Compress-Archive -Path dist/fvremote.exe -DestinationPath "${{ matrix.asset }}.zip"
           Get-Item "${{ matrix.asset }}.zip" | Format-List
 
       - name: Upload artifact
