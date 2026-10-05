@@ -21,9 +21,10 @@ import (
 	"github.com/victorbillyph/fvremote/internal/shell"
 	"github.com/victorbillyph/fvremote/internal/torx"
 	"github.com/victorbillyph/fvremote/internal/update"
+	"github.com/victorbillyph/fvremote/internal/tray"
 )
 
-const version = "0.7.1"
+const version = "0.7.2"
 
 // App é o backend exposto ao frontend (webview).
 type App struct {
@@ -87,6 +88,33 @@ func profile() (name, host string) {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	go a.bootstrap()
+	a.startTray()
+}
+
+func (a *App) startTray() {
+	go func() {
+		// Initialize tray with nil bus - it will create its own session bus on Linux
+		t := tray.NewTrayIcon(nil)
+		if err := t.Start(a.ctx); err != nil {
+			log.Printf("tray start warning: %v", err)
+			return
+		}
+
+		// Create the right-click menu
+		menu := &tray.Menu{
+			Items: []tray.MenuItem{
+				{Label: "Abrir UI", OnClick: func() {
+					a.ShowApp()
+				}},
+				{Label: "Sair", OnClick: func() {
+					a.QuitApp()
+				}},
+			},
+		}
+
+		// Show the menu (the OS will handle displaying it on tray icon right-click)
+		t.ShowMenu(menu)
+	}()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -497,6 +525,63 @@ func (a *App) ForgetClient(code string) { a.history.forget(code) }
 
 // ---- Atualizações ----
 
+func (a *App) sendNotification(id, title, body string, categoryID string, data map[string]interface{}) {
+	opts := runtime.NotificationOptions{
+		ID:         id,
+		Title:      title,
+		Body:       body,
+		CategoryID: categoryID,
+		Data:       data,
+	}
+	_ = runtime.SendNotification(a.ctx, opts)
+}
+
+func (a *App) NotifyConnection(code, status, msg string) {
+	a.sendNotification(
+		"connection",
+		"Conexão " + status,
+		msg,
+		"",
+		map[string]interface{}{"code": code, "status": status},
+	)
+}
+
+func (a *App) NotifyPermission(code string, action string, granted bool, msg string) {
+	a.sendNotification(
+		"permission",
+		"Permissão " + action,
+		msg,
+		"",
+		map[string]interface{}{"code": code, "action": action, "granted": granted},
+	)
+}
+
+func (a *App) NotifyCmd(code, title, output string) {
+	a.sendNotification(
+		"cmd",
+		"Terminal: "+title,
+		output,
+		"",
+		map[string]interface{}{"code": code, "title": title},
+	)
+}
+
+func (a *App) NotifyUpdate(available bool, current, latest string) {
+	var status string
+	if available {
+		status = "atualização disponível: " + latest
+	} else {
+		status = "vocão está na versão mais recente: " + current
+	}
+	a.sendNotification(
+		"update",
+		"Atualização",
+		status,
+		"",
+		map[string]interface{}{"current": current, "latest": latest, "available": available},
+	)
+}
+
 func (a *App) CheckUpdate() (*update.Info, error) {
 	socks := ""
 	if a.tor != nil {
@@ -508,6 +593,45 @@ func (a *App) CheckUpdate() (*update.Info, error) {
 	}
 	a.upd = info
 	return info, nil
+}
+
+func (a *App) startAutoUpdateChecker() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if a.shouldAutoUpdate() {
+				if info, err := a.CheckUpdate(); err == nil && info.Available {
+					a.NotifyUpdate(true, info.Current, info.Latest)
+					if err := a.DoUpdate(); err != nil {
+						a.NotifyUpdate(false, info.Current, info.Latest)
+						a.NotifyConnection("", "erro", err.Error())
+					}
+				}
+			}
+		}
+	}()
+}
+
+func (a *App) shouldAutoUpdate() bool {
+	a.mu.Lock()
+	idle := len(a.sessions) == 0
+	if a.hub != nil {
+		idle = idle && len(a.hub.Active()) == 0
+	}
+	a.mu.Unlock()
+	return idle
+}
+
+func (a *App) ShowApp() {
+	if a.ctx != nil {
+		runtime.WindowShow(a.ctx)
+	}
+}
+
+func (a *App) QuitApp() {
+	a.shutdown(nil)
+	os.Exit(0)
 }
 
 func (a *App) DoUpdate() error {
