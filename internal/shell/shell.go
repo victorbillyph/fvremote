@@ -21,6 +21,7 @@ func Exec(command string) Result {
 	} else {
 		cmd = exec.Command("sh", "-c", command)
 	}
+	setBackground(cmd)
 
 	done := make(chan Result, 1)
 	go func() {

@@ -23,7 +23,7 @@ import (
 	"github.com/victorbillyph/fvremote/internal/update"
 )
 
-const version = "0.7.0"
+const version = "0.7.1"
 
 // App é o backend exposto ao frontend (webview).
 type App struct {

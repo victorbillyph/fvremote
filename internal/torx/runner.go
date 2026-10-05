@@ -58,6 +58,9 @@ func Start(onProgress func(stage string, pct int)) (*Runner, error) {
 		return nil, err
 	}
 
+	// Encerra um Tor remanescente deste app antes de subir um novo.
+	killLeftoverTor()
+
 	socks, err := freePort()
 	if err != nil {
 		return nil, err
@@ -88,6 +91,7 @@ func Start(onProgress func(stage string, pct int)) (*Runner, error) {
 	case "darwin":
 		cmd.Env = append(cmd.Env, "DYLD_LIBRARY_PATH="+config.TorDir())
 	}
+	applyBackground(cmd)
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -102,6 +106,9 @@ func Start(onProgress func(stage string, pct int)) (*Runner, error) {
 
 	if err := cmd.Start(); err != nil {
 		return nil, err
+	}
+	if cmd.Process != nil {
+		writePIDFile(cmd.Process.Pid)
 	}
 	go r.scan(pr)
 	go func() { _ = cmd.Wait() }()
@@ -196,7 +203,10 @@ func (r *Runner) Stop() error {
 		r.ctrl = nil
 	}
 	if r.cmd != nil && r.cmd.Process != nil {
-		return r.cmd.Process.Kill()
+		pid := r.cmd.Process.Pid
+		_ = r.cmd.Process.Kill()
+		_ = killPID(pid) // garante o encerramento mesmo se Kill falhar
+		removePIDFile()
 	}
 	return nil
 }
