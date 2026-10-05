@@ -18,11 +18,12 @@ import (
 	"github.com/victorbillyph/fvremote/internal/config"
 	"github.com/victorbillyph/fvremote/internal/hub"
 	"github.com/victorbillyph/fvremote/internal/identity"
+	"github.com/victorbillyph/fvremote/internal/shell"
 	"github.com/victorbillyph/fvremote/internal/torx"
 	"github.com/victorbillyph/fvremote/internal/update"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
 
 // App é o backend exposto ao frontend (webview).
 type App struct {
@@ -147,6 +148,19 @@ func (a *App) bootstrap() {
 	a.hub = hub.New(a.name, a.host, a.id.Code, version)
 	a.hub.OnRequest = func(s *hub.Session) { a.emit("incoming:request", incomingView(s)) }
 	a.hub.OnChange = func() { a.emit("incoming:changed", a.incomingList()) }
+	a.hub.OnMessage = func(id string, m hub.ChatMsg) {
+		if m.From == "support" {
+			a.emit("incoming:chat", map[string]any{"id": id, "from": m.From, "text": m.Text, "at": m.At})
+		}
+	}
+	a.hub.OnShell = func(id string) {
+		s := a.hub.Get(id)
+		state := "none"
+		if s != nil {
+			state = s.Shell
+		}
+		a.emit("incoming:shell", map[string]any{"id": id, "state": state})
+	}
 	a.httpSrv = &http.Server{Handler: a.hub.Handler(), ReadHeaderTimeout: 15 * time.Second}
 	go func() { _ = a.httpSrv.Serve(ln) }()
 
@@ -398,6 +412,80 @@ func (a *App) SetIncomingPermission(id, perm string) {
 func (a *App) DisconnectIncoming(id string) {
 	if a.hub != nil {
 		a.hub.Disconnect(id)
+	}
+}
+
+// ---- Monitores, chat e terminal (lado Suporte) ----
+
+func (a *App) SetDisplay(code string, index int) {
+	if s := a.session(code); s != nil {
+		s.setDisplay(index)
+	}
+}
+
+func (a *App) SendChat(code, text string) {
+	if s := a.session(code); s != nil && text != "" {
+		s.sendChat(text)
+	}
+}
+
+// ChatHistory retorna todas as mensagens da sessão de suporte.
+func (a *App) ChatHistory(code string) []hub.ChatMsg {
+	s := a.session(code)
+	if s == nil || s.rem == nil || s.id == "" {
+		return nil
+	}
+	msgs, err := s.rem.ChatFetch(s.id, 0)
+	if err != nil {
+		return nil
+	}
+	return msgs
+}
+
+func (a *App) RequestShell(code string) {
+	if s := a.session(code); s != nil {
+		s.requestShell()
+	}
+}
+
+func (a *App) ShellStatus(code string) string {
+	if s := a.session(code); s != nil {
+		return s.shellStatus()
+	}
+	return "none"
+}
+
+func (a *App) ShellExec(code, cmd string) (shell.Result, error) {
+	if s := a.session(code); s != nil {
+		return s.shellExec(cmd)
+	}
+	return shell.Result{}, fmt.Errorf("sem sessão")
+}
+
+// ---- Chat e terminal (lado Cliente) ----
+
+func (a *App) IncomingChat(id string) []hub.ChatMsg {
+	if a.hub == nil {
+		return nil
+	}
+	return a.hub.Messages(id, 0)
+}
+
+func (a *App) SendIncomingChat(id, text string) {
+	if a.hub != nil && text != "" {
+		a.hub.AddClientMessage(id, text)
+	}
+}
+
+func (a *App) AllowShell(id string) {
+	if a.hub != nil {
+		a.hub.AllowShell(id)
+	}
+}
+
+func (a *App) DenyShell(id string) {
+	if a.hub != nil {
+		a.hub.DenyShell(id)
 	}
 }
 

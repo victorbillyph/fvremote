@@ -10,7 +10,7 @@
   const viewsEl = $("views");
   const modal = $("modal");
 
-  const state = { info: null, incoming: [], views: {}, active: null, history: [] };
+  const state = { info: null, incoming: [], views: {}, active: null, history: [], shellPrompted: null };
   const special = {
     Enter: "enter", Backspace: "backspace", Tab: "tab", Escape: "esc",
     Delete: "delete", Insert: "insert", ArrowUp: "up", ArrowDown: "down",
@@ -63,6 +63,9 @@
     RT().EventsOn("incoming:changed", (list) => { state.incoming = list || []; renderIncoming(); });
     RT().EventsOn("support:changed", onSupportChanged);
     RT().EventsOn("support:removed", (code) => removeSession(code));
+    RT().EventsOn("support:chat", onSupportChat);
+    RT().EventsOn("incoming:chat", onIncomingChat);
+    RT().EventsOn("incoming:shell", onIncomingShell);
     buildStaticTabs();
   });
 
@@ -73,7 +76,8 @@
     $("myCode").textContent = info.code || "—";
     $("myOnion").textContent = info.onion || "";
     switchTab("receive");
-    Go().Incoming().then((l) => { state.incoming = l || []; renderIncoming(); });
+    buildOverlay();
+    Go().Incoming().then((l) => { state.incoming = l || []; renderIncoming(); renderOverlay(); });
     Go().History().then((h) => { state.history = h || []; renderHistory(); });
     Go().CheckUpdate().then(onUpdate).catch(() => {});
   }
@@ -131,11 +135,31 @@
         <div class="muted" id="myOnion" style="word-break:break-all;text-align:center;margin-top:10px;font-family:monospace"></div>
         <h3 style="margin-top:28px">Suportes conectados</h3>
         <div id="incomingList"><span class="muted">Nenhum suporte conectado.</span></div>
+        <h3 style="margin-top:28px">Bate-papo</h3>
+        <div class="client-chat">
+          <div id="clientChatList" class="chat-list"><span class="muted">Sem mensagens.</span></div>
+          <div class="chat-input">
+            <input type="text" id="clientChatInput" placeholder="Mensagem para o Suporte…">
+            <button class="btn primary" id="clientChatSend">Enviar</button>
+          </div>
+        </div>
       </div>`;
     setTimeout(() => {
       $("copyCode").onclick = () => {
         if (state.info && state.info.code) { RT().ClipboardSetText(state.info.code); toast("Código copiado.", "ok"); }
       };
+      const send = () => {
+        const inp = $("clientChatInput");
+        const t = (inp.value || "").trim();
+        if (!t) return;
+        const id = (state.incoming[0] || {}).id;
+        if (!id) { toast("Nenhum suporte conectado.", "err"); return; }
+        Go().SendIncomingChat(id, t);
+        addClientChat("client", t);
+        inp.value = "";
+      };
+      $("clientChatSend").onclick = send;
+      $("clientChatInput").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
     }, 0);
     return s;
   }
@@ -196,6 +220,7 @@
       card.appendChild(row);
       box.appendChild(card);
     });
+    renderOverlay();
   }
 
   function onIncomingRequest(s) {
@@ -259,7 +284,10 @@
         <span class="client"></span>
         <span class="sessstatus"></span>
         <div class="spacer"></div>
+        <select class="monitors hidden" title="Monitor"></select>
         <button class="btn cap" disabled>Capturar mouse</button>
+        <button class="btn chat">Chat</button>
+        <button class="btn cmd" disabled>CMD</button>
         <button class="btn files">Arquivos</button>
         <button class="btn fs">Tela cheia</button>
         <button class="btn ghost disc">Desconectar</button>
@@ -280,6 +308,9 @@
       filesBtn: section.querySelector(".files"),
       fsBtn: section.querySelector(".fs"),
       discBtn: section.querySelector(".disc"),
+      monitors: section.querySelector(".monitors"),
+      chatBtn: section.querySelector(".chat"),
+      cmdBtn: section.querySelector(".cmd"),
       wrap: section.querySelector(".screen-wrap"),
       permission: "view",
       accepted: false,
@@ -288,7 +319,12 @@
       lastX: 0, lastY: 0,
       vx: 0, vy: 0,
       remoteW: 2, remoteH: 2,
+      displays: [],
       files: null,
+      chat: null,
+      term: null,
+      shellPoll: null,
+      seenChat: 0,
     };
     state.views[code] = view;
 
@@ -296,6 +332,9 @@
     view.fsBtn.onclick = () => Go().ToggleFullscreen();
     view.filesBtn.onclick = () => openFiles(view);
     view.discBtn.onclick = () => Go().Disconnect(code);
+    view.chatBtn.onclick = () => toggleChat(view);
+    view.cmdBtn.onclick = () => toggleCmd(view);
+    view.monitors.onchange = () => Go().SetDisplay(code, parseInt(view.monitors.value, 10));
     wireInput(view);
     resizeRemote(view);
 
@@ -326,6 +365,10 @@
 
     view.permission = v.permission;
     view.capBtn.disabled = v.permission !== "full";
+    view.cmdBtn.disabled = v.permission !== "full";
+    view.displays = v.displays || [];
+    view.shellState = v.shell || view.shellState;
+    renderMonitors(view, v.display || 0);
 
     if (v.state === "accepted" && !view.accepted) {
       view.accepted = true;
@@ -357,6 +400,179 @@
     if (tab) tab.remove();
     delete state.views[code];
     if (state.active === "sess:" + code) switchTab("support");
+  }
+
+  // ---------------------------------------------------------------- monitores / chat / cmd
+  function renderMonitors(view, selected) {
+    const sel = view.monitors;
+    const ds = view.displays || [];
+    if (ds.length <= 1) { sel.classList.add("hidden"); return; }
+    sel.classList.remove("hidden");
+    sel.innerHTML = "";
+    ds.forEach((d) => {
+      const o = document.createElement("option");
+      o.value = d.index;
+      o.textContent = `Monitor ${d.index + 1}${d.primary ? " (principal)" : ""} — ${d.width}x${d.height}`;
+      if (d.index === selected) o.selected = true;
+      sel.appendChild(o);
+    });
+  }
+
+  function closeSidePanels(view, except) {
+    [view.files && view.files.root, view.chat && view.chat.root].forEach((r) => {
+      if (r && r !== except) r.classList.add("hidden");
+    });
+  }
+
+  function toggleChat(view) {
+    if (!view.chat) view.chat = createChatPanel(view);
+    closeSidePanels(view, view.chat.root);
+    view.chat.root.classList.toggle("hidden");
+    if (!view.chat.root.classList.contains("hidden")) view.chat.input.focus();
+  }
+
+  function createChatPanel(view) {
+    const root = document.createElement("div");
+    root.className = "side-panel hidden";
+    root.innerHTML = `<div class="fp-head"><b>Chat</b><div class="spacer"></div><button class="btn ghost close">✕</button></div>
+      <div class="chat-list"></div>
+      <div class="chat-input"><input type="text" placeholder="Mensagem…"><button class="btn primary send">Enviar</button></div>`;
+    view.wrap.appendChild(root);
+    const panel = { root, list: root.querySelector(".chat-list"), input: root.querySelector("input") };
+    const send = () => { const t = panel.input.value.trim(); if (!t) return; Go().SendChat(view.code, t); panel.input.value = ""; };
+    root.querySelector(".close").onclick = () => root.classList.add("hidden");
+    root.querySelector(".send").onclick = send;
+    panel.input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+    Go().ChatHistory(view.code).then((msgs) => { (msgs || []).forEach((m) => addChat(view, m.from, m.text)); }).catch(() => {});
+    return panel;
+  }
+
+  function addChat(view, from, text) {
+    if (!view.chat) return;
+    const row = document.createElement("div");
+    row.className = "chat-msg " + (from === "support" ? "me" : "them");
+    row.innerHTML = `<span class="who">${from === "support" ? "Você" : "Cliente"}:</span> ${esc(text)}`;
+    view.chat.list.appendChild(row);
+    view.chat.list.scrollTop = view.chat.list.scrollHeight;
+  }
+
+  function onSupportChat(d) {
+    const view = state.views[d.code];
+    if (!view) return;
+    (d.messages || []).forEach((m) => addChat(view, m.from, m.text));
+  }
+
+  function toggleCmd(view) {
+    if (view.term && !view.term.root.classList.contains("hidden")) {
+      view.term.root.classList.add("hidden");
+      return;
+    }
+    Go().ShellStatus(view.code).then((state) => {
+      if (state === "allowed") { openTerm(view); return; }
+      Go().RequestShell(view.code);
+      toast("Pedido de terminal enviado ao Cliente…");
+      startShellPoll(view);
+    }).catch(() => {});
+  }
+
+  function startShellPoll(view) {
+    if (view.shellPoll) return;
+    view.shellPoll = setInterval(() => {
+      Go().ShellStatus(view.code).then((state) => {
+        if (state === "allowed") { clearInterval(view.shellPoll); view.shellPoll = null; openTerm(view); }
+        else if (state === "denied") { clearInterval(view.shellPoll); view.shellPoll = null; toast("O Cliente negou o terminal.", "err"); }
+      }).catch(() => {});
+    }, 1500);
+  }
+
+  function openTerm(view) {
+    if (!view.term) view.term = createTermPanel(view);
+    view.term.root.classList.remove("hidden");
+    view.term.input.focus();
+  }
+
+  function createTermPanel(view) {
+    const root = document.createElement("div");
+    root.className = "term-panel hidden";
+    root.innerHTML = `<div class="fp-head"><b>cmd — ${esc(view.clientName || view.code)}</b><div class="spacer"></div><button class="btn ghost close">✕</button></div>
+      <pre class="term-out"></pre>
+      <div class="term-in"><span>&gt;</span><input type="text" placeholder="Digite um comando e pressione Enter"></div>`;
+    view.wrap.appendChild(root);
+    const out = root.querySelector(".term-out");
+    const input = root.querySelector(".term-in input");
+    const run = () => {
+      const cmd = input.value;
+      if (!cmd.trim()) return;
+      input.value = "";
+      out.textContent += "> " + cmd + "\n";
+      out.scrollTop = out.scrollHeight;
+      Go().ShellExec(view.code, cmd).then((res) => {
+        if (res.output) out.textContent += res.output + (res.output.endsWith("\n") ? "" : "\n");
+        if (res.error) out.textContent += "[erro] " + res.error + "\n";
+        out.scrollTop = out.scrollHeight;
+      }).catch((e) => { out.textContent += "[erro] " + String(e) + "\n"; out.scrollTop = out.scrollHeight; });
+    };
+    root.querySelector(".close").onclick = () => root.classList.add("hidden");
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+    return { root, input, out };
+  }
+
+  // ---------------------------------------------------------------- cliente: chat / shell / overlay
+  function buildOverlay() {
+    if ($("statusOverlay")) return;
+    const el = document.createElement("div");
+    el.id = "statusOverlay";
+    el.className = "status-overlay empty";
+    el.innerHTML = `<div class="ov-row"><span class="ov-dot"></span><b>Sem conexões</b></div>`;
+    document.body.appendChild(el);
+  }
+
+  function renderOverlay() {
+    const el = $("statusOverlay");
+    if (!el) return;
+    const list = state.incoming || [];
+    if (list.length === 0) {
+      el.classList.add("empty");
+      el.innerHTML = `<div class="ov-row"><span class="ov-dot"></span><b>Sem conexões</b></div>
+        <div class="ov-sub">Aguardando suporte</div>`;
+      return;
+    }
+    el.classList.remove("empty");
+    const s = list[0];
+    const full = s.permission === "full";
+    el.innerHTML = `<div class="ov-row"><span class="ov-dot on"></span><b>Conectado</b></div>
+      <div class="ov-sub">${esc(s.name)} (${esc(s.host)})</div>
+      <div class="ov-sub">Acesso: ${full ? "controle total" : "somente leitura"}</div>
+      <div class="ov-sub">${list.length} suporte(s) conectado(s)</div>`;
+  }
+
+  function addClientChat(from, text) {
+    const list = $("clientChatList");
+    if (!list) return;
+    if (list.querySelector(".muted")) list.innerHTML = "";
+    const row = document.createElement("div");
+    row.className = "chat-msg " + (from === "client" ? "me" : "them");
+    row.innerHTML = `<span class="who">${from === "client" ? "Você" : "Suporte"}:</span> ${esc(text)}`;
+    list.appendChild(row);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  function onIncomingChat(d) {
+    addClientChat("support", d.text);
+    renderOverlay();
+  }
+
+  function onIncomingShell(d) {
+    if (d.state !== "pending") return;
+    if (state.shellPrompted === d.id) return;
+    state.shellPrompted = d.id;
+    const s = (state.incoming || []).find((x) => x.id === d.id) || {};
+    showModal("Pedido de terminal",
+      `${s.name || "O Suporte"} (${s.host || "remoto"}) quer abrir um terminal (cmd) no seu computador para executar comandos. Permitir?`,
+      "Permitir",
+      () => { Go().AllowShell(d.id); state.shellPrompted = null; toast("Terminal liberado para o Suporte.", "warn"); },
+      "Negar",
+      () => { Go().DenyShell(d.id); state.shellPrompted = null; });
   }
 
   // ---------------------------------------------------------------- input + cursor

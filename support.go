@@ -10,18 +10,23 @@ import (
 
 	"github.com/victorbillyph/fvremote/internal/hub"
 	"github.com/victorbillyph/fvremote/internal/remote"
+	"github.com/victorbillyph/fvremote/internal/screen"
+	"github.com/victorbillyph/fvremote/internal/shell"
 )
 
 // SessionView é o estado de uma sessão de suporte enviado ao frontend.
 type SessionView struct {
-	Code       string `json:"code"`
-	ClientName string `json:"clientName"`
-	ClientHost string `json:"clientHost"`
-	State      string `json:"state"`
-	Permission string `json:"permission"`
-	Message    string `json:"message"`
-	RemoteW    int    `json:"remoteW"`
-	RemoteH    int    `json:"remoteH"`
+	Code       string           `json:"code"`
+	ClientName string           `json:"clientName"`
+	ClientHost string           `json:"clientHost"`
+	State      string           `json:"state"`
+	Permission string           `json:"permission"`
+	Message    string           `json:"message"`
+	RemoteW    int              `json:"remoteW"`
+	RemoteH    int              `json:"remoteH"`
+	Displays   []screen.Display `json:"displays"`
+	Display    int              `json:"display"`
+	Shell      string           `json:"shell"`
 }
 
 type supportSession struct {
@@ -41,10 +46,15 @@ type supportSession struct {
 	message    string
 	remoteW    int
 	remoteH    int
+	displays   []screen.Display
+	display    int
+	shell      string
 	streaming  bool
 	closed     bool
+	body       io.ReadCloser
 
-	pollStop chan struct{}
+	chatIndex int
+	pollStop  chan struct{}
 }
 
 func (s *supportSession) view() SessionView {
@@ -59,6 +69,9 @@ func (s *supportSession) view() SessionView {
 		Message:    s.message,
 		RemoteW:    s.remoteW,
 		RemoteH:    s.remoteH,
+		Displays:   s.displays,
+		Display:    s.display,
+		Shell:      s.shell,
 	}
 }
 
@@ -112,6 +125,8 @@ func (s *supportSession) run() {
 	s.clientHost = hello.Host
 	s.remoteW = hello.Width
 	s.remoteH = hello.Height
+	s.displays = hello.Displays
+	s.display = 0
 	s.mu.Unlock()
 	s.setState("connecting", "Conectando…", "view")
 
@@ -168,7 +183,39 @@ func (s *supportSession) poll() {
 				s.app.history.record(s.code, name, host)
 				go s.runStream()
 			}
+			s.fetchChat()
 		}
+	}
+}
+
+func (s *supportSession) fetchChat() {
+	msgs, err := s.rem.ChatFetch(s.id, s.chatIndex)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	s.chatIndex += len(msgs)
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, map[string]any{"from": m.From, "text": m.Text, "at": m.At})
+	}
+	s.app.emit("support:chat", map[string]any{"code": s.code, "messages": out})
+}
+
+func (s *supportSession) setDisplay(index int) {
+	s.mu.Lock()
+	s.display = index
+	s.remoteW, s.remoteH = screen.SizeOf(index)
+	if s.body != nil {
+		_ = s.body.Close()
+		s.body = nil
+	}
+	s.mu.Unlock()
+	s.app.emit("support:changed", s.view())
+	s.mu.Lock()
+	running := s.streaming && !s.closed
+	s.mu.Unlock()
+	if running {
+		go s.runStream()
 	}
 }
 
@@ -179,13 +226,22 @@ func (s *supportSession) runStream() {
 		return
 	}
 	id := s.id
+	display := s.display
 	s.mu.Unlock()
 
-	body, err := s.rem.Stream(id)
+	body, err := s.rem.Stream(id, display)
 	if err != nil {
 		s.fail(err)
 		return
 	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		body.Close()
+		return
+	}
+	s.body = body
+	s.mu.Unlock()
 	defer body.Close()
 
 	br := bufio.NewReader(body)
@@ -206,6 +262,49 @@ func (s *supportSession) runStream() {
 	}
 }
 
+// -- Ações expostas à UI (Suporte) --
+
+func (s *supportSession) sendChat(text string) {
+	if s.rem == nil || s.id == "" {
+		return
+	}
+	_ = s.rem.ChatSend(s.id, text)
+	s.fetchChat()
+}
+
+func (s *supportSession) requestShell() {
+	if s.rem == nil || s.id == "" {
+		return
+	}
+	_ = s.rem.ShellRequest(s.id)
+	s.mu.Lock()
+	s.shell = "pending"
+	s.mu.Unlock()
+	s.app.emit("support:changed", s.view())
+}
+
+func (s *supportSession) shellStatus() string {
+	if s.rem == nil || s.id == "" {
+		return "none"
+	}
+	st, err := s.rem.ShellStatus(s.id)
+	if err != nil {
+		return s.view().Shell
+	}
+	s.mu.Lock()
+	s.shell = st
+	s.mu.Unlock()
+	s.app.emit("support:changed", s.view())
+	return st
+}
+
+func (s *supportSession) shellExec(cmd string) (shell.Result, error) {
+	if s.rem == nil || s.id == "" {
+		return shell.Result{}, fmt.Errorf("sem sessão")
+	}
+	return s.rem.ShellExec(s.id, cmd)
+}
+
 func (s *supportSession) close() {
 	s.mu.Lock()
 	if s.closed {
@@ -215,6 +314,9 @@ func (s *supportSession) close() {
 	s.closed = true
 	rem := s.rem
 	id := s.id
+	if s.body != nil {
+		_ = s.body.Close()
+	}
 	s.mu.Unlock()
 
 	close(s.pollStop)

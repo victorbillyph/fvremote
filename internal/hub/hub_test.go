@@ -68,3 +68,55 @@ func TestSessionFlow(t *testing.T) {
 		t.Fatalf("esperava 0 sessões ativas")
 	}
 }
+
+func TestChatAndShell(t *testing.T) {
+	h := New("S", "h", "C", "t")
+	h.OnRequest = func(*Session) {}
+	h.OnMessage = func(string, ChatMsg) {}
+	h.OnShell = func(string) {}
+
+	srv := httptest.NewServer(h.Handler())
+	defer srv.Close()
+
+	// conecta e aceita
+	resp, _ := http.Post(srv.URL+"/connect", "application/json", strings.NewReader(`{"name":"João","host":"pc"}`))
+	var out struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	h.Accept(out.ID)
+
+	// chat: suporte envia, cliente lê
+	resp, _ = http.Post(srv.URL+"/chat?id="+out.ID, "application/json", strings.NewReader(`{"text":"olá"}`))
+	resp.Body.Close()
+	resp, _ = http.Get(srv.URL + "/chat?id=" + out.ID + "&since=0")
+	var msgs []ChatMsg
+	_ = json.NewDecoder(resp.Body).Decode(&msgs)
+	resp.Body.Close()
+	if len(msgs) != 1 || msgs[0].Text != "olá" || msgs[0].From != "support" {
+		t.Fatalf("chat inesperado: %+v", msgs)
+	}
+
+	// terminal: antes de permitir -> 403
+	resp, _ = http.Post(srv.URL+"/shell/exec?id="+out.ID, "application/json", strings.NewReader(`{"cmd":"echo oi"}`))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("exec sem permissão = %d, quer 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// pedido e permissão
+	resp, _ = http.Post(srv.URL+"/shell/request?id="+out.ID, "application/json", nil)
+	resp.Body.Close()
+	h.AllowShell(out.ID)
+
+	resp, _ = http.Post(srv.URL+"/shell/exec?id="+out.ID, "application/json", strings.NewReader(`{"cmd":"echo fvremote-teste"}`))
+	var res struct {
+		Output string `json:"output"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&res)
+	resp.Body.Close()
+	if !strings.Contains(res.Output, "fvremote-teste") {
+		t.Fatalf("saída do terminal: %q", res.Output)
+	}
+}

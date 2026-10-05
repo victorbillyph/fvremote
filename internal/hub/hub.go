@@ -17,6 +17,7 @@ import (
 	"github.com/victorbillyph/fvremote/internal/config"
 	"github.com/victorbillyph/fvremote/internal/input"
 	"github.com/victorbillyph/fvremote/internal/screen"
+	"github.com/victorbillyph/fvremote/internal/shell"
 )
 
 const (
@@ -35,16 +36,25 @@ type Session struct {
 	SupportHost string    `json:"support_host"`
 	Status      string    `json:"status"`
 	Permission  string    `json:"permission"`
+	Shell       string    `json:"shell"` // none|pending|allowed|denied
 	Created     time.Time `json:"created"`
 }
 
+// ChatMsg é uma mensagem de bate-papo do Suporte/Cliente.
+type ChatMsg struct {
+	From string    `json:"from"` // "support" ou "client"
+	Text string    `json:"text"`
+	At   time.Time `json:"at"`
+}
+
 type Hello struct {
-	Name    string `json:"name"`
-	Host    string `json:"host"`
-	Code    string `json:"code"`
-	Version string `json:"version"`
-	Width   int    `json:"width"`
-	Height  int    `json:"height"`
+	Name     string           `json:"name"`
+	Host     string           `json:"host"`
+	Code     string           `json:"code"`
+	Version  string           `json:"version"`
+	Width    int              `json:"width"`
+	Height   int              `json:"height"`
+	Displays []screen.Display `json:"displays"`
 }
 
 type ConnectReq struct {
@@ -62,11 +72,16 @@ type Hub struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	msgs     map[string][]ChatMsg
 
 	// OnRequest é chamado quando chega uma nova solicitação de conexão.
 	OnRequest func(*Session)
 	// OnChange é chamado quando o estado de uma sessão muda.
 	OnChange func()
+	// OnMessage é chamado quando chega uma mensagem de chat do Suporte.
+	OnMessage func(sessionID string, m ChatMsg)
+	// OnShell é chamado quando o Suporte pede para abrir o terminal.
+	OnShell func(sessionID string)
 }
 
 func New(name, host, code, version string) *Hub {
@@ -76,6 +91,7 @@ func New(name, host, code, version string) *Hub {
 		Code:     code,
 		Version:  version,
 		sessions: map[string]*Session{},
+		msgs:     map[string][]ChatMsg{},
 	}
 }
 
@@ -97,6 +113,10 @@ func (h *Hub) Handler() http.Handler {
 	mux.HandleFunc("/files", h.filesList)
 	mux.HandleFunc("/download", h.download)
 	mux.HandleFunc("/upload", h.upload)
+	mux.HandleFunc("/chat", h.chat)
+	mux.HandleFunc("/shell/request", h.shellRequest)
+	mux.HandleFunc("/shell/status", h.shellStatus)
+	mux.HandleFunc("/shell/exec", h.shellExec)
 	return mux
 }
 
@@ -105,6 +125,9 @@ func (h *Hub) session(id string) *Session {
 	defer h.mu.Unlock()
 	return h.sessions[id]
 }
+
+// Get retorna uma sessão pelo ID.
+func (h *Hub) Get(id string) *Session { return h.session(id) }
 
 // requireAccepted retorna a sessão se ela existir e estiver aceita.
 func (h *Hub) requireAccepted(w http.ResponseWriter, id string) *Session {
@@ -131,7 +154,10 @@ func (h *Hub) requireFull(w http.ResponseWriter, id string) *Session {
 
 func (h *Hub) hello(w http.ResponseWriter, r *http.Request) {
 	wi, he := screen.Size()
-	writeJSON(w, Hello{Name: h.Name, Host: h.Host, Code: h.Code, Version: h.Version, Width: wi, Height: he})
+	writeJSON(w, Hello{
+		Name: h.Name, Host: h.Host, Code: h.Code, Version: h.Version,
+		Width: wi, Height: he, Displays: screen.Displays(),
+	})
 }
 
 func (h *Hub) connect(w http.ResponseWriter, r *http.Request) {
@@ -150,6 +176,7 @@ func (h *Hub) connect(w http.ResponseWriter, r *http.Request) {
 		SupportHost: req.Host,
 		Status:      StatusPending,
 		Permission:  PermView,
+		Shell:       "none",
 		Created:     time.Now(),
 	}
 	h.mu.Lock()
@@ -243,12 +270,143 @@ func (h *Hub) changed() {
 	}
 }
 
+// ---- Bate-papo ----
+
+func (h *Hub) addMessage(sessionID, from, text string) {
+	m := ChatMsg{From: from, Text: text, At: time.Now()}
+	h.mu.Lock()
+	h.msgs[sessionID] = append(h.msgs[sessionID], m)
+	h.mu.Unlock()
+	if h.OnMessage != nil {
+		h.OnMessage(sessionID, m)
+	}
+}
+
+// AddClientMessage registra uma mensagem enviada pelo próprio Cliente.
+func (h *Hub) AddClientMessage(sessionID, text string) {
+	h.addMessage(sessionID, "client", text)
+}
+
+// Messages retorna as mensagens da sessão a partir de um índice.
+func (h *Hub) Messages(sessionID string, since int) []ChatMsg {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	all := h.msgs[sessionID]
+	if since < 0 {
+		since = 0
+	}
+	if since >= len(all) {
+		return []ChatMsg{}
+	}
+	out := make([]ChatMsg, len(all)-since)
+	copy(out, all[since:])
+	return out
+}
+
+func (h *Hub) chat(w http.ResponseWriter, r *http.Request) {
+	s := h.requireAccepted(w, r.URL.Query().Get("id"))
+	if s == nil {
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Text == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		h.addMessage(s.ID, "support", body.Text)
+		w.WriteHeader(http.StatusOK)
+	default:
+		since, _ := strconv.Atoi(r.URL.Query().Get("since"))
+		writeJSON(w, h.Messages(s.ID, since))
+	}
+}
+
+// ---- Terminal remoto (cmd) ----
+
+func (h *Hub) shellRequest(w http.ResponseWriter, r *http.Request) {
+	s := h.requireAccepted(w, r.URL.Query().Get("id"))
+	if s == nil {
+		return
+	}
+	h.mu.Lock()
+	if s.Shell != "allowed" {
+		s.Shell = "pending"
+	}
+	h.mu.Unlock()
+	if h.OnShell != nil {
+		h.OnShell(s.ID)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Hub) shellStatus(w http.ResponseWriter, r *http.Request) {
+	s := h.requireAccepted(w, r.URL.Query().Get("id"))
+	if s == nil {
+		return
+	}
+	h.mu.Lock()
+	state := s.Shell
+	h.mu.Unlock()
+	writeJSON(w, map[string]string{"state": state})
+}
+
+func (h *Hub) shellExec(w http.ResponseWriter, r *http.Request) {
+	s := h.requireAccepted(w, r.URL.Query().Get("id"))
+	if s == nil {
+		return
+	}
+	h.mu.Lock()
+	allowed := s.Shell == "allowed"
+	h.mu.Unlock()
+	if !allowed {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	var body struct {
+		Cmd string `json:"cmd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Cmd == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, shell.Exec(body.Cmd))
+}
+
+// AllowShell libera o terminal remoto para a sessão.
+func (h *Hub) AllowShell(id string) {
+	h.mu.Lock()
+	if s := h.sessions[id]; s != nil {
+		s.Shell = "allowed"
+	}
+	h.mu.Unlock()
+	if h.OnShell != nil {
+		h.OnShell(id)
+	}
+}
+
+// DenyShell nega o terminal remoto.
+func (h *Hub) DenyShell(id string) {
+	h.mu.Lock()
+	if s := h.sessions[id]; s != nil {
+		s.Shell = "denied"
+	}
+	h.mu.Unlock()
+	if h.OnShell != nil {
+		h.OnShell(id)
+	}
+}
+
 // ---- Streaming / controle ----
 
 func (h *Hub) stream(w http.ResponseWriter, r *http.Request) {
 	if h.requireAccepted(w, r.URL.Query().Get("id")) == nil {
 		return
 	}
+	display, _ := strconv.Atoi(r.URL.Query().Get("display"))
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "stream não suportado", http.StatusInternalServerError)
@@ -263,7 +421,7 @@ func (h *Hub) stream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var buf bytes.Buffer
-		if err := screen.WriteJPEG(&buf, 70); err != nil {
+		if err := screen.WriteJPEGDisplay(&buf, display, 70); err != nil {
 			return
 		}
 		var hdr [4]byte
