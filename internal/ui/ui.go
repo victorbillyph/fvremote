@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -22,7 +23,7 @@ import (
 	"github.com/victorbillyph/fvremote/internal/torx"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 // App mantém o estado do fvremote (é Cliente e Suporte ao mesmo tempo).
 type App struct {
@@ -45,21 +46,42 @@ type App struct {
 	// widgets principais
 	codeLb      *widget.Label
 	statusLb    *widget.Label
-	statusDot   *canvas.Circle
 	busy        *widget.ProgressBarInfinite
 	connectEnt  *widget.Entry
 	sessionsBox *fyne.Container
-	remoteTabs  *container.AppTabs
-	remoteScr   *remoteCanvas
-	files       *filesTab
+	mainTabs    *container.AppTabs
 
-	// estado do Suporte
+	fullScreen bool
+
+	mu       sync.Mutex
+	sessions map[string]*supportSession
+}
+
+// supportSession é uma sessão de suporte (um Cliente sendo assistido).
+type supportSession struct {
+	app        *App
 	rem        *remote.Remote
-	sessionID  string
+	id         string
+	clientName string
+	clientHost string
+	clientCode string
+
 	permission string
 	streaming  bool
+	captured   bool
 	remoteW    int
 	remoteH    int
+	closed     bool
+
+	canvas     *remoteCanvas
+	tab        *container.TabItem
+	clientLb   *widget.Label
+	statusTxt  *canvas.Text
+	captureBtn *widget.Button
+	fsBtn      *widget.Button
+	filesWin   fyne.Window
+	files      *filesTab
+	pollStop   chan struct{}
 }
 
 // Run inicia a aplicação.
@@ -67,10 +89,10 @@ func Run() {
 	a := app.NewWithID("io.github.victorbillyph.fvremote")
 	a.Settings().SetTheme(newTheme())
 	w := a.NewWindow("fvremote")
-	w.Resize(fyne.NewSize(1060, 720))
+	w.Resize(fyne.NewSize(1100, 740))
 	w.CenterOnScreen()
 
-	app := &App{fyneApp: a, win: w}
+	app := &App{fyneApp: a, win: w, sessions: map[string]*supportSession{}}
 	app.name, app.host = profile()
 
 	w.SetContent(app.setupContent())
@@ -143,11 +165,7 @@ func (a *App) bootstrap() {
 	r, err := torx.Start(func(stage string, pct int) {
 		switch stage {
 		case "download":
-			if pct > 0 {
-				a.setSetup(fmt.Sprintf("Baixando Tor (exclusivo do fvremote)… %d%%", pct), pct)
-			} else {
-				a.setSetup("Baixando Tor (exclusivo do fvremote)…", 0)
-			}
+			a.setSetup(fmt.Sprintf("Baixando Tor (exclusivo do fvremote)… %d%%", pct), pct)
 		case "bootstrap":
 			a.setSetup(fmt.Sprintf("Conectando à rede Tor… %d%%", pct), pct)
 		case "ready":
@@ -194,11 +212,7 @@ func (a *App) mainContent() fyne.CanvasObject {
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	sub := canvas.NewText("acesso remoto descentralizado via Tor", colMuted)
 	sub.TextSize = 12
-	a.statusDot = canvas.NewCircle(colOk)
-	a.statusDot.Resize(fyne.NewSize(10, 10))
-	online := widget.NewLabel("online")
-	header := container.NewBorder(nil, nil, container.NewVBox(title, sub),
-		container.NewHBox(a.statusDot, online))
+	header := container.NewBorder(nil, nil, container.NewVBox(title, sub), nil)
 
 	// --- Aba: Receber suporte ---
 	a.codeLb = widget.NewLabel(a.id.Code)
@@ -230,9 +244,9 @@ func (a *App) mainContent() fyne.CanvasObject {
 
 	// --- Aba: Prestar suporte ---
 	a.connectEnt = widget.NewEntry()
-	a.connectEnt.SetPlaceHolder("Cole o código do Cliente (ex.: XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX)")
+	a.connectEnt.SetPlaceHolder("Digite os 19 dígitos do código do Cliente")
 	connectBtn := widget.NewButton("Conectar", a.doConnect)
-	disconnectBtn := widget.NewButton("Desconectar", a.doDisconnect)
+	a.connectEnt.OnSubmitted = func(string) { a.doConnect() }
 
 	a.statusLb = widget.NewLabel("Pronto para conectar.")
 	a.busy = widget.NewProgressBarInfinite()
@@ -240,22 +254,16 @@ func (a *App) mainContent() fyne.CanvasObject {
 
 	connectTop := container.NewVBox(
 		container.NewBorder(nil, nil, nil, connectBtn, a.connectEnt),
-		container.NewHBox(a.statusLb, a.busy, disconnectBtn),
+		container.NewHBox(a.statusLb, a.busy),
+		widget.NewLabelWithStyle("Ao conectar, a sessão abre em uma aba própria com a tela em tela cheia.", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}),
 	)
+	connectTab := container.NewBorder(container.NewPadded(connectTop), nil, nil, nil)
 
-	a.remoteScr = newRemoteCanvas(a)
-	a.files = newFilesTab(a)
-	a.remoteTabs = container.NewAppTabs(
-		container.NewTabItem("Tela", a.remoteScr),
-		container.NewTabItem("Arquivos", a.files.object()),
-	)
-	connectTab := container.NewBorder(container.NewPadded(connectTop), nil, nil, nil, a.remoteTabs)
-
-	tabs := container.NewAppTabs(
+	a.mainTabs = container.NewAppTabs(
 		container.NewTabItem("Receber suporte", myTab),
 		container.NewTabItem("Prestar suporte", connectTab),
 	)
-	return container.NewBorder(container.NewPadded(header), nil, nil, nil, tabs)
+	return container.NewBorder(container.NewPadded(header), nil, nil, nil, a.mainTabs)
 }
 
 // ---- status ----
@@ -265,20 +273,6 @@ func (a *App) setStatus(text, kind string) {
 		return
 	}
 	a.statusLb.SetText(text)
-	if a.statusDot == nil {
-		return
-	}
-	switch kind {
-	case "ok":
-		a.statusDot.FillColor = colOk
-	case "warn":
-		a.statusDot.FillColor = colWarn
-	case "err":
-		a.statusDot.FillColor = colErr
-	default:
-		a.statusDot.FillColor = colPrimary
-	}
-	a.statusDot.Refresh()
 }
 
 func (a *App) setBusy(b bool) {
@@ -308,7 +302,7 @@ func (a *App) showRequest(s *hub.Session) {
 			a.setStatus("Solicitação recusada.", "warn")
 		}
 	}, a.win)
-	d.Resize(fyne.NewSize(440, 220))
+	d.Resize(fyne.NewSize(460, 230))
 	d.Show()
 }
 
@@ -327,14 +321,9 @@ func (a *App) refreshSessions() {
 		perm := widget.NewLabel("Acesso: " + permPortuguese(s.Permission))
 		var toggle *widget.Button
 		if s.Permission == hub.PermFull {
-			toggle = widget.NewButton("Voltar para somente leitura", func() {
-				a.hub.SetPermission(s.ID, hub.PermView)
-			})
-			perm.SetText("Acesso: controle total")
+			toggle = widget.NewButton("Voltar para somente leitura", func() { a.hub.SetPermission(s.ID, hub.PermView) })
 		} else {
-			toggle = widget.NewButton("Dar acesso total", func() {
-				a.hub.SetPermission(s.ID, hub.PermFull)
-			})
+			toggle = widget.NewButton("Dar acesso total", func() { a.hub.SetPermission(s.ID, hub.PermFull) })
 		}
 		disconnect := widget.NewButton("Desconectar", func() { a.hub.Disconnect(s.ID) })
 		card := container.NewVBox(title, perm, container.NewHBox(toggle, disconnect), widget.NewSeparator())
@@ -357,11 +346,19 @@ func (a *App) doConnect() {
 		dialog.ShowInformation("fvremote", "A rede Tor ainda está iniciando.", a.win)
 		return
 	}
-	code := strings.TrimSpace(a.connectEnt.Text)
-	if code == "" {
-		dialog.ShowError(fmt.Errorf("informe o código do Cliente"), a.win)
+	code, err := identity.NormalizeCode(strings.TrimSpace(a.connectEnt.Text))
+	if err != nil {
+		dialog.ShowError(err, a.win)
 		return
 	}
+	a.mu.Lock()
+	if s, ok := a.sessions[code]; ok {
+		a.mu.Unlock()
+		a.mainTabs.Select(s.tab)
+		return
+	}
+	a.mu.Unlock()
+
 	onion, err := identity.DeriveFromCode(code)
 	if err != nil {
 		dialog.ShowError(err, a.win)
@@ -376,9 +373,9 @@ func (a *App) doConnect() {
 			a.failConnect(err)
 			return
 		}
-		var h *hub.Hello
+		var hello *hub.Hello
 		for i := 0; i < 3; i++ {
-			h, err = rem.Hello()
+			hello, err = rem.Hello()
 			if err == nil {
 				break
 			}
@@ -388,19 +385,38 @@ func (a *App) doConnect() {
 			a.failConnect(fmt.Errorf("não foi possível alcançar o Cliente (ele pode estar offline)"))
 			return
 		}
-		a.rem = rem
-		a.remoteW, a.remoteH = h.Width, h.Height
 
-		fyne.Do(func() { a.setStatus("Conectando…", "info") })
 		id, err := rem.Connect(hub.ConnectReq{Name: a.name, Host: a.host, Code: a.id.Code})
 		if err != nil {
 			a.failConnect(err)
 			return
 		}
-		a.sessionID = id
-		a.permission = hub.PermView
-		fyne.Do(func() { a.setStatus("Pedindo autorização ao Cliente…", "warn") })
-		a.poll()
+
+		s := &supportSession{
+			app:        a,
+			rem:        rem,
+			id:         id,
+			clientName: hello.Name,
+			clientHost: hello.Host,
+			clientCode: code,
+			permission: hub.PermView,
+			remoteW:    hello.Width,
+			remoteH:    hello.Height,
+			pollStop:   make(chan struct{}),
+		}
+		s.canvas = newRemoteCanvas(s)
+
+		fyne.Do(func() {
+			a.setBusy(false)
+			a.setStatus("Pedindo autorização ao Cliente…", "warn")
+			s.tab = container.NewTabItem("Cliente: "+hello.Name, s.build())
+			a.mainTabs.Append(s.tab)
+			a.mainTabs.Select(s.tab)
+		})
+		a.mu.Lock()
+		a.sessions[code] = s
+		a.mu.Unlock()
+		a.runPoll(s)
 	}()
 }
 
@@ -409,71 +425,173 @@ func (a *App) failConnect(err error) {
 		a.setBusy(false)
 		a.setStatus(err.Error(), "err")
 	})
-	a.rem = nil
-	a.sessionID = ""
-	a.streaming = false
 }
 
-func (a *App) poll() {
-	id := a.sessionID
+func (a *App) runPoll(s *supportSession) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		if a.sessionID != id || a.rem == nil {
+	for {
+		select {
+		case <-s.pollStop:
 			return
+		case <-ticker.C:
 		}
-		s, err := a.rem.Poll(id)
+		cur, err := s.rem.Poll(s.id)
 		if err != nil {
-			a.failConnect(err)
+			if !s.closed {
+				s.setStatus(err.Error(), "err")
+				s.disconnect()
+			}
 			return
 		}
-		switch s.Status {
+		switch cur.Status {
 		case hub.StatusRejected:
-			a.failConnect(fmt.Errorf("conexão recusada pelo Cliente"))
+			s.setStatus("conexão recusada pelo Cliente", "err")
+			s.disconnect()
 			return
 		case hub.StatusAccepted:
-			if s.Permission != a.permission {
-				a.permission = s.Permission
-				fyne.Do(func() { a.applyPermission(s.Permission) })
+			if cur.Permission != s.permission {
+				s.permission = cur.Permission
+				fyne.Do(func() { s.applyPermission() })
 			}
-			if !a.streaming {
-				a.streaming = true
-				fyne.Do(func() {
-					a.setBusy(false)
-					a.applyPermission(s.Permission)
-					a.remoteTabs.SelectIndex(0)
-				})
-				a.startStream()
+			if !s.streaming {
+				s.streaming = true
+				fyne.Do(func() { s.applyPermission() })
+				a.startStream(s)
 			}
 		}
 	}
 }
 
-func (a *App) applyPermission(perm string) {
-	if perm == hub.PermFull {
-		a.setStatus("Conectado — controle total liberado pelo Cliente.", "ok")
-	} else {
-		a.setStatus("Conectado — somente leitura (peça ao Cliente para liberar o controle).", "ok")
-	}
-}
-
-func (a *App) startStream() {
-	body, err := a.rem.Stream(a.sessionID)
+func (a *App) startStream(s *supportSession) {
+	body, err := s.rem.Stream(s.id)
 	if err != nil {
-		a.failConnect(err)
+		s.setStatus(err.Error(), "err")
+		s.disconnect()
 		return
 	}
-	go a.remoteScr.readFrames(body)
+	go s.canvas.readFrames(body)
 }
 
-func (a *App) doDisconnect() {
-	if a.rem != nil && a.sessionID != "" {
-		a.rem.Bye(a.sessionID)
+// ---- métodos da sessão ----
+
+func (s *supportSession) canControl() bool {
+	return s.permission == hub.PermFull && !s.closed
+}
+
+func (s *supportSession) build() fyne.CanvasObject {
+	s.clientLb = widget.NewLabel("Cliente: " + s.clientName + " (" + s.clientHost + ")")
+	s.statusTxt = canvas.NewText("pedindo autorização…", colWarn)
+	s.statusTxt.TextSize = 13
+
+	s.captureBtn = widget.NewButton("Capturar mouse", s.toggleCapture)
+	s.captureBtn.Disable()
+	filesBtn := widget.NewButton("Arquivos", s.openFiles)
+	s.fsBtn = widget.NewButton("Tela cheia", s.toggleFullscreen)
+	discBtn := widget.NewButton("Desconectar", s.disconnect)
+
+	left := container.NewHBox(s.clientLb, s.statusTxt)
+	right := container.NewHBox(s.captureBtn, filesBtn, s.fsBtn, discBtn)
+	bar := container.NewBorder(nil, nil, left, right)
+
+	return container.NewBorder(container.NewPadded(bar), nil, nil, nil, s.canvas)
+}
+
+func (s *supportSession) setStatus(text, kind string) {
+	if s.statusTxt == nil {
+		return
 	}
-	a.rem = nil
-	a.sessionID = ""
-	a.permission = ""
-	a.streaming = false
-	a.setBusy(false)
-	a.setStatus("Desconectado.", "info")
+	fyne.Do(func() {
+		s.statusTxt.Text = text
+		switch kind {
+		case "ok":
+			s.statusTxt.Color = colOk
+		case "warn":
+			s.statusTxt.Color = colWarn
+		case "err":
+			s.statusTxt.Color = colErr
+		default:
+			s.statusTxt.Color = colMuted
+		}
+		s.statusTxt.Refresh()
+	})
+}
+
+func (s *supportSession) applyPermission() {
+	if s.statusTxt == nil {
+		return
+	}
+	if s.canControl() {
+		s.statusTxt.Text = "controle total"
+		s.statusTxt.Color = colOk
+		s.captureBtn.Enable()
+	} else {
+		s.statusTxt.Text = "somente leitura"
+		s.statusTxt.Color = colPrimary
+		s.captured = false
+		s.captureBtn.SetText("Capturar mouse")
+		s.captureBtn.Disable()
+	}
+	s.statusTxt.Refresh()
+	s.canvas.Refresh()
+}
+
+func (s *supportSession) toggleCapture() {
+	if !s.canControl() {
+		return
+	}
+	s.captured = !s.captured
+	if s.captured {
+		s.captureBtn.SetText("Soltar mouse")
+	} else {
+		s.captureBtn.SetText("Capturar mouse")
+	}
+	s.canvas.Refresh()
+}
+
+func (s *supportSession) toggleFullscreen() {
+	s.app.fullScreen = !s.app.fullScreen
+	s.app.win.SetFullScreen(s.app.fullScreen)
+	if s.app.fullScreen {
+		s.fsBtn.SetText("Sair da tela cheia")
+	} else {
+		s.fsBtn.SetText("Tela cheia")
+	}
+}
+
+func (s *supportSession) openFiles() {
+	if s.rem == nil {
+		return
+	}
+	if s.filesWin == nil {
+		w := s.app.fyneApp.NewWindow("Arquivos — " + s.clientName)
+		s.files = newFilesTab(s)
+		w.SetContent(s.files.object())
+		w.Resize(fyne.NewSize(780, 560))
+		s.filesWin = w
+	}
+	s.files.refresh()
+	s.filesWin.Show()
+}
+
+func (s *supportSession) disconnect() {
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.pollStop)
+	if s.rem != nil && s.id != "" {
+		s.rem.Bye(s.id)
+	}
+	fyne.Do(func() {
+		if s.app.mainTabs != nil && s.tab != nil {
+			s.app.mainTabs.Remove(s.tab)
+		}
+		if s.filesWin != nil {
+			s.filesWin.Close()
+		}
+	})
+	s.app.mu.Lock()
+	delete(s.app.sessions, s.clientCode)
+	s.app.mu.Unlock()
 }

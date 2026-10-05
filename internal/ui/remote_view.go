@@ -17,14 +17,14 @@ import (
 // remoteCanvas exibe o stream da tela remota e envia eventos de mouse/teclado.
 type remoteCanvas struct {
 	widget.BaseWidget
-	app *App
-	img *canvas.Image
+	session *supportSession
+	img     *canvas.Image
 }
 
-func newRemoteCanvas(app *App) *remoteCanvas {
+func newRemoteCanvas(s *supportSession) *remoteCanvas {
 	r := &remoteCanvas{
-		app: app,
-		img: canvas.NewImageFromImage(image.NewRGBA(image.Rect(0, 0, 2, 2))),
+		session: s,
+		img:     canvas.NewImageFromImage(image.NewRGBA(image.Rect(0, 0, 2, 2))),
 	}
 	r.img.FillMode = canvas.ImageFillContain
 	r.img.ScaleMode = canvas.ImageScaleFastest
@@ -36,32 +36,40 @@ func (r *remoteCanvas) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(r.img)
 }
 
+// Cursor esconde o cursor local quando o mouse está capturado (acesso total).
+func (r *remoteCanvas) Cursor() desktop.Cursor {
+	if r.canControl() && r.session.captured {
+		return desktop.HiddenCursor
+	}
+	return desktop.DefaultCursor
+}
+
+func (r *remoteCanvas) canControl() bool {
+	return r.session != nil && r.session.canControl()
+}
+
 func (r *remoteCanvas) toRemote(pos fyne.Position) (int, int) {
-	a := r.app
-	if a.remoteW == 0 || r.Size().Width == 0 || r.Size().Height == 0 {
+	s := r.session
+	if s == nil || s.remoteW == 0 || r.Size().Width == 0 || r.Size().Height == 0 {
 		return 0, 0
 	}
 	sx := float32(pos.X) / r.Size().Width
 	sy := float32(pos.Y) / r.Size().Height
-	x := int(sx * float32(a.remoteW))
-	y := int(sy * float32(a.remoteH))
+	x := int(sx * float32(s.remoteW))
+	y := int(sy * float32(s.remoteH))
 	if x < 0 {
 		x = 0
 	}
 	if y < 0 {
 		y = 0
 	}
-	if x >= a.remoteW {
-		x = a.remoteW - 1
+	if x >= s.remoteW {
+		x = s.remoteW - 1
 	}
-	if y >= a.remoteH {
-		y = a.remoteH - 1
+	if y >= s.remoteH {
+		y = s.remoteH - 1
 	}
 	return x, y
-}
-
-func (r *remoteCanvas) canControl() bool {
-	return r.app != nil && r.app.rem != nil && r.app.permission == "full" && r.app.sessionID != ""
 }
 
 func (r *remoteCanvas) MouseMoved(e *desktop.MouseEvent) {
@@ -69,7 +77,7 @@ func (r *remoteCanvas) MouseMoved(e *desktop.MouseEvent) {
 		return
 	}
 	x, y := r.toRemote(e.Position)
-	go r.app.rem.Move(r.app.sessionID, x, y)
+	go r.session.rem.Move(r.session.id, x, y)
 }
 
 func (r *remoteCanvas) MouseIn(*desktop.MouseEvent) {}
@@ -82,8 +90,8 @@ func (r *remoteCanvas) MouseDown(e *desktop.MouseEvent) {
 	x, y := r.toRemote(e.Position)
 	left := e.Button == desktop.MouseButtonPrimary
 	go func() {
-		_ = r.app.rem.Move(r.app.sessionID, x, y)
-		_ = r.app.rem.Click(r.app.sessionID, left, true)
+		_ = r.session.rem.Move(r.session.id, x, y)
+		_ = r.session.rem.Click(r.session.id, left, true)
 	}()
 }
 
@@ -92,7 +100,7 @@ func (r *remoteCanvas) MouseUp(e *desktop.MouseEvent) {
 		return
 	}
 	left := e.Button == desktop.MouseButtonPrimary
-	go r.app.rem.Click(r.app.sessionID, left, false)
+	go r.session.rem.Click(r.session.id, left, false)
 }
 
 func (r *remoteCanvas) Scrolled(e *fyne.ScrollEvent) {
@@ -100,7 +108,7 @@ func (r *remoteCanvas) Scrolled(e *fyne.ScrollEvent) {
 		return
 	}
 	if dy := int(e.Scrolled.DY); dy != 0 {
-		go r.app.rem.Scroll(r.app.sessionID, dy)
+		go r.session.rem.Scroll(r.session.id, dy)
 	}
 }
 
@@ -119,8 +127,8 @@ func (r *remoteCanvas) TypedRune(rn rune) {
 	}
 	s := string(rn)
 	go func() {
-		_ = r.app.rem.Key(r.app.sessionID, s, true)
-		_ = r.app.rem.Key(r.app.sessionID, s, false)
+		_ = r.session.rem.Key(r.session.id, s, true)
+		_ = r.session.rem.Key(r.session.id, s, false)
 	}()
 }
 
@@ -130,8 +138,8 @@ func (r *remoteCanvas) TypedKey(e *fyne.KeyEvent) {
 	}
 	if name, ok := specialKeys[e.Name]; ok {
 		go func() {
-			_ = r.app.rem.Key(r.app.sessionID, name, true)
-			_ = r.app.rem.Key(r.app.sessionID, name, false)
+			_ = r.session.rem.Key(r.session.id, name, true)
+			_ = r.session.rem.Key(r.session.id, name, false)
 		}()
 	}
 }
@@ -141,7 +149,7 @@ func (r *remoteCanvas) KeyDown(e *fyne.KeyEvent) {
 		return
 	}
 	if name, ok := modifierKeys[e.Name]; ok {
-		go r.app.rem.Key(r.app.sessionID, name, true)
+		go r.session.rem.Key(r.session.id, name, true)
 	}
 }
 
@@ -150,7 +158,7 @@ func (r *remoteCanvas) KeyUp(e *fyne.KeyEvent) {
 		return
 	}
 	if name, ok := modifierKeys[e.Name]; ok {
-		go r.app.rem.Key(r.app.sessionID, name, false)
+		go r.session.rem.Key(r.session.id, name, false)
 	}
 }
 

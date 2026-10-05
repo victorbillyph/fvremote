@@ -2,35 +2,50 @@ package identity
 
 import "testing"
 
-func TestDeriveKnownVector(t *testing.T) {
-	// Vetor validado contra o comando ADD_ONION do Tor real.
-	id, err := derive([]byte("teste-fvremote-123"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	const want = "pvzmjwvpwau3cdp55k2za7jrsmmfivtkzdaxmuu3ns5xdpk2wxpvfjqd.onion"
-	if id.Onion != want {
-		t.Fatalf("onion = %s, quer %s", id.Onion, want)
-	}
-}
-
-func TestCodeRoundTrip(t *testing.T) {
-	raw := make([]byte, 20)
-	for i := range raw {
-		raw[i] = byte(i * 7)
-	}
-	code := FormatCode(raw)
-	got, err := ParseCode(code)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(raw) {
-		t.Fatalf("round trip falhou: %x != %x (code=%s)", got, raw, code)
+func TestNewCode(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		c, err := newCode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(c) != codeLen {
+			t.Fatalf("código %q tem %d dígitos", c, len(c))
+		}
+		clean, err := NormalizeCode(c)
+		if err != nil || clean != c {
+			t.Fatalf("código gerado não normaliza: %q (%v)", c, err)
+		}
 	}
 }
 
-func TestDeriveFromCode(t *testing.T) {
-	if _, err := DeriveFromCode("XXXX"); err == nil {
+func TestNormalizeCode(t *testing.T) {
+	got, err := NormalizeCode("123 456-789 0123456789")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1234567890123456789" {
+		t.Fatalf("normalize = %q", got)
+	}
+	if _, err := NormalizeCode("1234"); err == nil {
 		t.Fatal("esperava erro para código curto")
+	}
+}
+
+func TestDeriveDeterministic(t *testing.T) {
+	const code = "1234567890123456789"
+	id1, err := derive(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := derive(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1.Onion != id2.Onion || id1.TorBlob != id2.TorBlob {
+		t.Fatal("derivação não é determinística")
+	}
+	onion, err := DeriveFromCode("123 456 789 012 345 678 9")
+	if err != nil || onion != id1.Onion {
+		t.Fatalf("DeriveFromCode = %q (%v)", onion, err)
 	}
 }

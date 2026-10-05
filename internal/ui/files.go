@@ -14,17 +14,17 @@ import (
 )
 
 type filesTab struct {
-	app    *App
-	path   string
-	list   *widget.List
-	items  []hub.FileItem
-	sel    int
-	pathLb *widget.Label
-	root   fyne.CanvasObject
+	session *supportSession
+	path    string
+	list    *widget.List
+	items   []hub.FileItem
+	sel     int
+	pathLb  *widget.Label
+	root    fyne.CanvasObject
 }
 
-func newFilesTab(app *App) *filesTab {
-	f := &filesTab{app: app, sel: -1}
+func newFilesTab(s *supportSession) *filesTab {
+	f := &filesTab{session: s, sel: -1}
 	f.pathLb = widget.NewLabel("~")
 	f.list = widget.NewList(
 		func() int { return len(f.items) },
@@ -54,7 +54,7 @@ func newFilesTab(app *App) *filesTab {
 	})
 	refresh := widget.NewButton("Atualizar", func() { f.refresh() })
 	download := widget.NewButton("Baixar", func() { f.downloadSelected() })
-	upload := widget.NewButton("Enviar arquivo", func() { f.upload() })
+	upload := widget.NewButton("Enviar", func() { f.upload() })
 
 	top := container.NewBorder(nil, nil, nil, container.NewHBox(refresh, download, upload), container.NewHBox(up, f.pathLb))
 	f.root = container.NewBorder(top, nil, nil, nil, f.list)
@@ -64,18 +64,18 @@ func newFilesTab(app *App) *filesTab {
 func (f *filesTab) object() fyne.CanvasObject { return f.root }
 
 func (f *filesTab) refresh() {
-	a := f.app
-	if a.rem == nil || a.sessionID == "" || a.permission != "full" {
+	s := f.session
+	if s == nil || s.rem == nil || s.id == "" || s.permission != hub.PermFull {
 		return
 	}
 	if f.path == "" {
-		f.path, _ = homeDir()
+		f.path, _ = os.UserHomeDir()
 	}
 	f.pathLb.SetText(f.path)
 	go func() {
-		items, err := a.rem.List(a.sessionID, f.path)
+		items, err := s.rem.List(s.id, f.path)
 		if err != nil {
-			fyne.Do(func() { a.setStatus(err.Error(), "err") })
+			fyne.Do(func() { s.setStatus(err.Error(), "err") })
 			return
 		}
 		fyne.Do(func() {
@@ -87,9 +87,9 @@ func (f *filesTab) refresh() {
 }
 
 func (f *filesTab) downloadSelected() {
-	a := f.app
+	s := f.session
 	if f.sel < 0 || f.sel >= len(f.items) || f.items[f.sel].Dir {
-		dialog.ShowInformation("fvremote", "Selecione um arquivo para baixar.", a.win)
+		dialog.ShowInformation("fvremote", "Selecione um arquivo para baixar.", s.app.win)
 		return
 	}
 	it := f.items[f.sel]
@@ -100,17 +100,17 @@ func (f *filesTab) downloadSelected() {
 		dst := wc.URI().Path()
 		_ = wc.Close()
 		go func() {
-			if err := a.rem.Download(a.sessionID, it.Path, dst); err != nil {
-				fyne.Do(func() { a.setStatus(err.Error(), "err") })
+			if err := s.rem.Download(s.id, it.Path, dst); err != nil {
+				fyne.Do(func() { s.setStatus(err.Error(), "err") })
 			}
 		}()
-	}, a.win)
+	}, s.app.win)
 }
 
 func (f *filesTab) upload() {
-	a := f.app
-	if a.rem == nil || a.sessionID == "" || a.permission != "full" {
-		dialog.ShowInformation("fvremote", "É necessário acesso total para enviar arquivos.", a.win)
+	s := f.session
+	if s.permission != hub.PermFull {
+		dialog.ShowInformation("fvremote", "É necessário acesso total para enviar arquivos.", s.app.win)
 		return
 	}
 	dialog.ShowFileOpen(func(rc fyne.URIReadCloser, err error) {
@@ -120,15 +120,11 @@ func (f *filesTab) upload() {
 		path := rc.URI().Path()
 		_ = rc.Close()
 		go func() {
-			if err := a.rem.Upload(a.sessionID, path); err != nil {
-				fyne.Do(func() { a.setStatus(err.Error(), "err") })
+			if err := s.rem.Upload(s.id, path); err != nil {
+				fyne.Do(func() { s.setStatus(err.Error(), "err") })
 				return
 			}
-			fyne.Do(func() { a.setStatus("Arquivo enviado: "+filepath.Base(path), "ok") })
+			fyne.Do(func() { s.setStatus("Arquivo enviado: "+filepath.Base(path), "ok") })
 		}()
-	}, a.win)
-}
-
-func homeDir() (string, error) {
-	return os.UserHomeDir()
+	}, s.app.win)
 }
