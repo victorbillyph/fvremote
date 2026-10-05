@@ -19,12 +19,17 @@ import (
 	"github.com/victorbillyph/fvremote/internal/config"
 )
 
-// codeLen é o número de dígitos do código (apenas números).
-const codeLen = 19
+// codeLen é o número de dígitos gerados para novas identidades.
+// Aceitamos uma faixa para manter códigos antigos válidos.
+const (
+	codeLen    = 12
+	minCodeLen = 8
+	maxCodeLen = 19
+)
 
 // Identity é a identidade única deste dispositivo.
 type Identity struct {
-	Code    string // código numérico de 19 dígitos
+	Code    string // código numérico exibido (ex.: "1234 5678 9012")
 	Created time.Time
 
 	Onion   string // endereço .onion derivado do código
@@ -65,7 +70,7 @@ func LoadOrCreate() (*Identity, error) {
 	return id, nil
 }
 
-// newCode gera um código numérico aleatório de 19 dígitos.
+// newCode gera um código numérico aleatório de codeLen dígitos.
 func newCode() (string, error) {
 	limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(codeLen), nil)
 	n, err := rand.Int(rand.Reader, limit)
@@ -75,7 +80,7 @@ func newCode() (string, error) {
 	return fmt.Sprintf("%0*d", codeLen, n), nil
 }
 
-// NormalizeCode mantém apenas dígitos e exige exatamente codeLen dígitos.
+// NormalizeCode mantém apenas dígitos e aceita de minCodeLen a maxCodeLen dígitos.
 func NormalizeCode(code string) (string, error) {
 	var sb strings.Builder
 	for _, r := range code {
@@ -84,10 +89,22 @@ func NormalizeCode(code string) (string, error) {
 		}
 	}
 	clean := sb.String()
-	if len(clean) != codeLen {
-		return "", fmt.Errorf("código inválido: esperado %d dígitos, recebido %d", codeLen, len(clean))
+	if len(clean) < minCodeLen || len(clean) > maxCodeLen {
+		return "", fmt.Errorf("código inválido: esperado de %d a %d dígitos, recebido %d", minCodeLen, maxCodeLen, len(clean))
 	}
 	return clean, nil
+}
+
+// FormatCode agrupa os dígitos de 4 em 4 para facilitar a leitura/memorização.
+func FormatCode(code string) string {
+	var b strings.Builder
+	for i, r := range code {
+		if i > 0 && i%4 == 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // DeriveFromCode calcula o endereço .onion a partir de um código digitado.
@@ -129,7 +146,7 @@ func derive(code string) (*Identity, error) {
 	onion := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(addr)) + ".onion"
 
 	return &Identity{
-		Code:    code,
+		Code:    FormatCode(code),
 		Created: time.Now().UTC(),
 		Onion:   onion,
 		TorBlob: base64.StdEncoding.EncodeToString(blob),

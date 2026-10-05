@@ -147,7 +147,7 @@
     s.innerHTML = `
       <div class="pane">
         <h2>Prestar suporte</h2>
-        <input type="text" id="codeInput" inputmode="numeric" placeholder="Digite os 19 dígitos do código do Cliente (ou use o histórico abaixo)">
+        <input type="text" id="codeInput" inputmode="numeric" placeholder="Digite o código do Cliente (8 a 19 dígitos, ex.: 1234 5678 9012)">
         <div class="row" style="margin-top:12px"><button class="btn primary" id="connectBtn">Conectar</button></div>
         <div class="hint">A sessão abre em uma aba própria, com a tela em tela cheia e as opções na barra superior.</div>
         <h3 style="margin-top:28px">Histórico de clientes</h3>
@@ -162,7 +162,7 @@
 
   function doConnect() {
     const code = ($("codeInput").value || "").replace(/\D/g, "");
-    if (code.length !== 19) { toast("O código deve ter 19 dígitos.", "err"); return; }
+    if (code.length < 8 || code.length > 19) { toast("O código deve ter de 8 a 19 dígitos.", "err"); return; }
     Go().Connect(code).catch((e) => toast(String(e), "err"));
   }
 
@@ -220,7 +220,7 @@
       const row = document.createElement("div");
       row.className = "hist-item";
       const when = it.last ? new Date(it.last).toLocaleString() : "";
-      row.innerHTML = `<div class="info"><b>${esc(it.name || it.code)}</b><span>${esc(it.host || "")} · ${esc(it.code)}</span></div>
+      row.innerHTML = `<div class="info"><b>${esc(it.name || fmtCode(it.code))}</b><span>${esc(it.host || "")} · ${esc(fmtCode(it.code))}</span></div>
         <span class="muted">${esc(when)}</span>`;
       row.ondblclick = () => showClientInfo(it);
       const forget = document.createElement("button");
@@ -235,7 +235,7 @@
 
   function showClientInfo(it) {
     showModal("Informações do cliente",
-      `Nome: ${it.name || "—"}\nHost: ${it.host || "—"}\nCódigo: ${it.code}\nÚltima conexão: ${it.last ? new Date(it.last).toLocaleString() : "—"}`,
+      `Nome: ${it.name || "—"}\nHost: ${it.host || "—"}\nCódigo: ${fmtCode(it.code)}\nÚltima conexão: ${it.last ? new Date(it.last).toLocaleString() : "—"}`,
       "Conectar novamente",
       () => { Go().Connect(it.code).catch((e) => toast(String(e), "err")); },
       "Fechar",
@@ -530,6 +530,7 @@
 
   // ---------------------------------------------------------------- utils
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function fmtCode(s) { return String(s || "").replace(/(\d{4})(?=\d)/g, "$1 "); }
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
   function human(n) { if (n < 1024) return n + " B"; if (n < 1048576) return (n / 1024).toFixed(1) + " KB"; if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB"; return (n / 1073741824).toFixed(1) + " GB"; }
 })();

@@ -19,20 +19,31 @@ func TestNewCode(t *testing.T) {
 }
 
 func TestNormalizeCode(t *testing.T) {
-	got, err := NormalizeCode("123 456-789 0123456789")
-	if err != nil {
-		t.Fatal(err)
+	got, err := NormalizeCode("1234 5678 9012")
+	if err != nil || got != "123456789012" {
+		t.Fatalf("normalize 12 = %q (%v)", got, err)
 	}
-	if got != "1234567890123456789" {
-		t.Fatalf("normalize = %q", got)
+	// código antigo de 19 dígitos continua válido
+	old, err := NormalizeCode("123 456-789 0123456789")
+	if err != nil || old != "1234567890123456789" {
+		t.Fatalf("normalize 19 = %q (%v)", old, err)
 	}
-	if _, err := NormalizeCode("1234"); err == nil {
-		t.Fatal("esperava erro para código curto")
+	if _, err := NormalizeCode("1234567"); err == nil {
+		t.Fatal("esperava erro para 7 dígitos")
+	}
+	if _, err := NormalizeCode("12345678901234567890"); err == nil {
+		t.Fatal("esperava erro para 20 dígitos")
+	}
+}
+
+func TestFormatCode(t *testing.T) {
+	if got := FormatCode("123456789012"); got != "1234 5678 9012" {
+		t.Fatalf("FormatCode = %q", got)
 	}
 }
 
 func TestDeriveDeterministic(t *testing.T) {
-	const code = "1234567890123456789"
+	const code = "123456789012"
 	id1, err := derive(code)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +55,10 @@ func TestDeriveDeterministic(t *testing.T) {
 	if id1.Onion != id2.Onion || id1.TorBlob != id2.TorBlob {
 		t.Fatal("derivação não é determinística")
 	}
-	onion, err := DeriveFromCode("123 456 789 012 345 678 9")
+	if id1.Code != "1234 5678 9012" {
+		t.Fatalf("Code exibido = %q", id1.Code)
+	}
+	onion, err := DeriveFromCode("1234 5678 9012")
 	if err != nil || onion != id1.Onion {
 		t.Fatalf("DeriveFromCode = %q (%v)", onion, err)
 	}

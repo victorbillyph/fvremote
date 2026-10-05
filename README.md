@@ -10,7 +10,9 @@ sem instalar nem tocar no Tor do sistema.
 
 ## Como funciona
 
-1. Cada instalação gera um **código numérico de 19 dígitos**.
+1. Cada instalação gera um **código numérico de 12 dígitos**, exibido em grupos
+   de 4 (ex.: `1234 5678 9012`). Códigos antigos de 8 a 19 dígitos também são
+   aceitos.
 2. Esse código é transformado, de forma determinística, em um endereço `.onion`
    (chave ed25519 derivada do código via `ADD_ONION` do Tor).
 3. Quem tem o código **encontra o Cliente na rede Tor** e pede conexão — sem
