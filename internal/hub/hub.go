@@ -302,6 +302,8 @@ func (h *Hub) input(w http.ResponseWriter, r *http.Request) {
 	case "move":
 		input.Move(e.X, e.Y)
 	case "click":
+		input.Move(e.X, e.Y)
+		time.Sleep(10 * time.Millisecond)
 		input.Click(e.Btn != "right", e.Down)
 	case "scroll":
 		input.Scroll(e.Val)

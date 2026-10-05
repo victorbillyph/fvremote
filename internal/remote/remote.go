@@ -119,12 +119,12 @@ func (r *Remote) Move(id string, x, y int) error {
 	return r.send(id, map[string]any{"type": "move", "x": x, "y": y})
 }
 
-func (r *Remote) Click(id string, left, down bool) error {
+func (r *Remote) Click(id string, left, down bool, x, y int) error {
 	btn := "left"
 	if !left {
 		btn = "right"
 	}
-	return r.send(id, map[string]any{"type": "click", "btn": btn, "down": down})
+	return r.send(id, map[string]any{"type": "click", "btn": btn, "down": down, "x": x, "y": y})
 }
 
 func (r *Remote) Scroll(id string, delta int) error {

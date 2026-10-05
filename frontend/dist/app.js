@@ -10,7 +10,7 @@
   const viewsEl = $("views");
   const modal = $("modal");
 
-  const state = { info: null, incoming: [], views: {}, active: null };
+  const state = { info: null, incoming: [], views: {}, active: null, history: [] };
   const special = {
     Enter: "enter", Backspace: "backspace", Tab: "tab", Escape: "esc",
     Delete: "delete", Insert: "insert", ArrowUp: "up", ArrowDown: "down",
@@ -36,7 +36,18 @@
     el.className = "toast " + (kind || "");
     el.textContent = msg;
     box.appendChild(el);
-    setTimeout(() => el.remove(), 4000);
+    setTimeout(() => el.remove(), 5000);
+  }
+
+  function showModal(title, msg, confirmText, onConfirm, cancelText, onCancel) {
+    $("modalTitle").textContent = title;
+    $("modalMsg").textContent = msg;
+    const acc = $("modalAccept"), rej = $("modalReject");
+    acc.textContent = confirmText || "Aceitar";
+    rej.textContent = cancelText || "Rejeitar";
+    acc.onclick = () => { modal.classList.add("hidden"); onConfirm && onConfirm(); };
+    rej.onclick = () => { modal.classList.add("hidden"); onCancel && onCancel(); };
+    modal.classList.remove("hidden");
   }
 
   // ---------------------------------------------------------------- boot
@@ -62,7 +73,21 @@
     $("myCode").textContent = info.code || "—";
     $("myOnion").textContent = info.onion || "";
     switchTab("receive");
-    Go().Incoming().then((list) => { state.incoming = list || []; renderIncoming(); });
+    Go().Incoming().then((l) => { state.incoming = l || []; renderIncoming(); });
+    Go().History().then((h) => { state.history = h || []; renderHistory(); });
+    Go().CheckUpdate().then(onUpdate).catch(() => {});
+  }
+
+  function onUpdate(info) {
+    if (!info || !info.available) return;
+    $("updateText").textContent = "Nova versão v" + info.latest + " disponível";
+    $("updateBanner").classList.remove("hidden");
+    $("updateBtn").onclick = () => {
+      showModal("Atualizar fvremote", `Baixar e instalar a versão v${info.latest}? O app será reiniciado.`, "Atualizar", () => {
+        toast("Baixando atualização…");
+        Go().DoUpdate().catch((e) => toast(String(e), "err"));
+      }, "Cancelar", null);
+    };
   }
 
   // ---------------------------------------------------------------- tabs
@@ -79,7 +104,9 @@
     const b = document.createElement("button");
     b.className = "tab";
     b.dataset.tab = id;
-    b.textContent = label;
+    const span = document.createElement("span");
+    span.textContent = label;
+    b.appendChild(span);
     b.onclick = () => switchTab(id);
     tabsEl.appendChild(b);
     return b;
@@ -89,10 +116,6 @@
     state.active = id;
     [...tabsEl.children].forEach((t) => t.classList.toggle("active", t.dataset.tab === id));
     [...viewsEl.children].forEach((v) => v.classList.toggle("active", v.id === "view-" + id));
-    if (id && id.startsWith("sess:")) {
-      const v = state.views[id.slice(5)];
-      if (v && v.img && v.permission === "full") v.img.focus();
-    }
   }
 
   function buildReceiveView() {
@@ -124,9 +147,11 @@
     s.innerHTML = `
       <div class="pane">
         <h2>Prestar suporte</h2>
-        <input type="text" id="codeInput" inputmode="numeric" placeholder="Digite os 19 dígitos do código do Cliente">
+        <input type="text" id="codeInput" inputmode="numeric" placeholder="Digite os 19 dígitos do código do Cliente (ou use o histórico abaixo)">
         <div class="row" style="margin-top:12px"><button class="btn primary" id="connectBtn">Conectar</button></div>
         <div class="hint">A sessão abre em uma aba própria, com a tela em tela cheia e as opções na barra superior.</div>
+        <h3 style="margin-top:28px">Histórico de clientes</h3>
+        <div id="historyList"><span class="muted">Nenhum cliente no histórico ainda.</span></div>
       </div>`;
     setTimeout(() => {
       $("connectBtn").onclick = doConnect;
@@ -174,20 +199,55 @@
   }
 
   function onIncomingRequest(s) {
-    $("modalMsg").textContent = `${s.name} (${s.host}) quer se conectar ao seu computador. O acesso inicia como somente leitura.`;
-    modal.classList.remove("hidden");
-    $("modalAccept").onclick = () => { modal.classList.add("hidden"); Go().AcceptIncoming(s.id); toast("Suporte conectado — somente leitura.", "ok"); };
-    $("modalReject").onclick = () => { modal.classList.add("hidden"); Go().RejectIncoming(s.id); };
+    showModal("Solicitação de conexão",
+      `${s.name} (${s.host}) quer se conectar ao seu computador. O acesso inicia como somente leitura.`,
+      "Aceitar",
+      () => { Go().AcceptIncoming(s.id); toast("Suporte conectado — somente leitura.", "ok"); },
+      "Rejeitar",
+      () => Go().RejectIncoming(s.id));
   }
 
-  // ---------------------------------------------------------------- support sessions (eu assistindo)
+  // ---------------------------------------------------------------- history
+  function renderHistory() {
+    const box = $("historyList");
+    if (!box) return;
+    if (!state.history || state.history.length === 0) {
+      box.innerHTML = '<span class="muted">Nenhum cliente no histórico ainda.</span>';
+      return;
+    }
+    box.innerHTML = "";
+    state.history.forEach((it) => {
+      const row = document.createElement("div");
+      row.className = "hist-item";
+      const when = it.last ? new Date(it.last).toLocaleString() : "";
+      row.innerHTML = `<div class="info"><b>${esc(it.name || it.code)}</b><span>${esc(it.host || "")} · ${esc(it.code)}</span></div>
+        <span class="muted">${esc(when)}</span>`;
+      row.ondblclick = () => showClientInfo(it);
+      const forget = document.createElement("button");
+      forget.className = "btn ghost forget";
+      forget.textContent = "Esquecer";
+      forget.onclick = (e) => { e.stopPropagation(); Go().ForgetClient(it.code).then(() => { state.history = state.history.filter((x) => x.code !== it.code); renderHistory(); }); };
+      row.appendChild(forget);
+      row.title = "Clique duas vezes para ver informações";
+      box.appendChild(row);
+    });
+  }
+
+  function showClientInfo(it) {
+    showModal("Informações do cliente",
+      `Nome: ${it.name || "—"}\nHost: ${it.host || "—"}\nCódigo: ${it.code}\nÚltima conexão: ${it.last ? new Date(it.last).toLocaleString() : "—"}`,
+      "Conectar novamente",
+      () => { Go().Connect(it.code).catch((e) => toast(String(e), "err")); },
+      "Fechar",
+      null);
+  }
+
+  // ---------------------------------------------------------------- support sessions
   function onSupportChanged(v) {
     let view = state.views[v.code];
     if (!view) view = createSessionView(v);
     updateSession(view, v);
   }
-
-  function onSupportRemoved(code) { removeSession(code); }
 
   function createSessionView(v) {
     const code = v.code;
@@ -206,6 +266,7 @@
       </div>
       <div class="screen-wrap">
         <img class="screen connecting" alt="">
+        <div class="cursor hidden"></div>
       </div>`;
     viewsEl.appendChild(section);
 
@@ -214,6 +275,7 @@
       client: section.querySelector(".client"),
       status: section.querySelector(".sessstatus"),
       img: section.querySelector(".screen"),
+      cursor: section.querySelector(".cursor"),
       capBtn: section.querySelector(".cap"),
       filesBtn: section.querySelector(".files"),
       fsBtn: section.querySelector(".fs"),
@@ -222,6 +284,8 @@
       permission: "view",
       accepted: false,
       capture: false,
+      hovering: false,
+      lastX: 0, lastY: 0,
       vx: 0, vy: 0,
       remoteW: 2, remoteH: 2,
       files: null,
@@ -233,15 +297,26 @@
     view.filesBtn.onclick = () => openFiles(view);
     view.discBtn.onclick = () => Go().Disconnect(code);
     wireInput(view);
+    resizeRemote(view);
 
-    const tab = addTab("sess:" + code, "Cliente: " + (v.clientName || code));
-    tab.dataset.code = code;
+    addTab("sess:" + code, "Cliente: " + (v.clientName || code));
     return view;
   }
 
+  function resizeRemote(view) {
+    view.remoteW = view.remoteW || 2;
+    view.remoteH = view.remoteH || 2;
+    view.lastX = Math.round(view.remoteW / 2);
+    view.lastY = Math.round(view.remoteH / 2);
+    view.vx = view.lastX; view.vy = view.lastY;
+  }
+
   function updateSession(view, v) {
-    view.remoteW = v.remoteW || view.remoteW;
-    view.remoteH = v.remoteH || view.remoteH;
+    if (v.remoteW > 2 || v.remoteH > 2) {
+      view.remoteW = v.remoteW;
+      view.remoteH = v.remoteH;
+    }
+    resizeRemote(view);
     view.client.textContent = "Cliente: " + (v.clientName || v.code) + (v.clientHost ? " (" + v.clientHost + ")" : "");
     const tab = [...tabsEl.children].find((t) => t.dataset.tab === "sess:" + v.code);
     if (tab) tab.firstChild.textContent = "Cliente: " + (v.clientName || v.code);
@@ -249,9 +324,8 @@
     view.status.textContent = v.message || v.state;
     view.status.className = "sessstatus " + stateClass(v.state);
 
-    const full = v.permission === "full";
     view.permission = v.permission;
-    view.capBtn.disabled = !full;
+    view.capBtn.disabled = v.permission !== "full";
 
     if (v.state === "accepted" && !view.accepted) {
       view.accepted = true;
@@ -261,6 +335,9 @@
     }
     if (v.state === "error" || v.state === "rejected") {
       view.img.classList.add("connecting");
+    }
+    if (v.state === "accepted") {
+      Go().History().then((h) => { state.history = h || []; renderHistory(); });
     }
   }
 
@@ -274,7 +351,7 @@
   function removeSession(code) {
     const view = state.views[code];
     if (!view) return;
-    document.exitPointerLock && document.exitPointerLock();
+    if (document.pointerLockElement === view.img && document.exitPointerLock) document.exitPointerLock();
     view.section.remove();
     const tab = [...tabsEl.children].find((t) => t.dataset.tab === "sess:" + code);
     if (tab) tab.remove();
@@ -282,40 +359,52 @@
     if (state.active === "sess:" + code) switchTab("support");
   }
 
-  // ---------------------------------------------------------------- mouse / keyboard
+  // ---------------------------------------------------------------- input + cursor
   function wireInput(view) {
     const img = view.img;
 
+    img.addEventListener("mouseenter", () => { view.hovering = true; updateCursor(view); });
+    img.addEventListener("mouseleave", () => { view.hovering = false; updateCursor(view); });
+
     img.addEventListener("mousemove", (e) => {
       if (view.permission !== "full") return;
+      let p;
       if (document.pointerLockElement === img) {
         const scale = view.remoteW / Math.max(1, img.clientWidth);
         view.vx = clamp(view.vx + e.movementX * scale, 0, view.remoteW - 1);
         view.vy = clamp(view.vy + e.movementY * scale, 0, view.remoteH - 1);
-        Go().Move(view.code, Math.round(view.vx), Math.round(view.vy));
+        p = { x: Math.round(view.vx), y: Math.round(view.vy) };
       } else {
-        const p = toRemote(view, e);
-        Go().Move(view.code, p.x, p.y);
+        p = toRemote(view, e);
       }
+      view.lastX = p.x; view.lastY = p.y;
+      updateCursor(view);
+      Go().Move(view.code, p.x, p.y);
     });
 
     img.addEventListener("mousedown", (e) => {
       if (view.permission !== "full") return;
       e.preventDefault();
-      const p = toRemote(view, e);
-      Go().Move(view.code, p.x, p.y);
-      Go().Click(view.code, e.button === 0, true);
+      const p = currentPos(view, e);
+      view.lastX = p.x; view.lastY = p.y; updateCursor(view);
+      Go().Click(view.code, e.button === 0, true, p.x, p.y);
     });
     img.addEventListener("mouseup", (e) => {
       if (view.permission !== "full") return;
-      Go().Click(view.code, e.button === 0, false);
+      const p = currentPos(view, e);
+      Go().Click(view.code, e.button === 0, false, p.x, p.y);
     });
-    img.addEventListener("contextmenu", (e) => { e.preventDefault(); });
+    img.addEventListener("contextmenu", (e) => e.preventDefault());
     img.addEventListener("wheel", (e) => {
       if (view.permission !== "full") return;
       e.preventDefault();
       Go().Scroll(view.code, e.deltaY < 0 ? 3 : -3);
     }, { passive: false });
+  }
+
+  function currentPos(view, e) {
+    if (document.pointerLockElement === view.img) return { x: Math.round(view.vx), y: Math.round(view.vy) };
+    return toRemote(view, e);
   }
 
   function toRemote(view, e) {
@@ -325,9 +414,21 @@
     const scale = Math.min(r.width / rw, r.height / rh);
     const dispW = rw * scale, dispH = rh * scale;
     const offX = (r.width - dispW) / 2, offY = (r.height - dispH) / 2;
-    let x = (e.clientX - r.left - offX) / scale;
-    let y = (e.clientY - r.top - offY) / scale;
+    const x = (e.clientX - r.left - offX) / scale;
+    const y = (e.clientY - r.top - offY) / scale;
     return { x: clamp(Math.round(x), 0, rw - 1), y: clamp(Math.round(y), 0, rh - 1) };
+  }
+
+  function updateCursor(view) {
+    const img = view.img, r = img.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    const rw = view.remoteW, rh = view.remoteH;
+    const scale = Math.min(r.width / rw, r.height / rh);
+    const offX = (r.width - rw * scale) / 2, offY = (r.height - rh * scale) / 2;
+    view.cursor.style.left = (offX + view.lastX * scale) + "px";
+    view.cursor.style.top = (offY + view.lastY * scale) + "px";
+    const show = view.accepted && view.permission === "full" && (view.hovering || view.capture);
+    view.cursor.classList.toggle("hidden", !show);
   }
 
   function toggleCapture(view) {
@@ -337,15 +438,14 @@
     view.capBtn.classList.toggle("active", view.capture);
     view.img.classList.toggle("capture", view.capture);
     if (view.capture) {
-      view.vx = Math.round(view.remoteW / 2);
-      view.vy = Math.round(view.remoteH / 2);
       if (view.img.requestPointerLock) {
         const p = view.img.requestPointerLock();
         if (p && p.catch) p.catch(() => {});
       }
-    } else {
-      if (document.exitPointerLock) document.exitPointerLock();
+    } else if (document.exitPointerLock) {
+      document.exitPointerLock();
     }
+    updateCursor(view);
   }
 
   document.addEventListener("keydown", (e) => {
@@ -407,7 +507,6 @@
   function loadFiles(view, path) {
     Go().ListFiles(view.code, path).then((items) => {
       const panel = view.files;
-      panel.path = path || (items.length ? "" : path);
       panel.items = items || [];
       panel.sel = null;
       panel.list.innerHTML = "";

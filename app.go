@@ -15,12 +15,14 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/victorbillyph/fvremote/internal/config"
 	"github.com/victorbillyph/fvremote/internal/hub"
 	"github.com/victorbillyph/fvremote/internal/identity"
 	"github.com/victorbillyph/fvremote/internal/torx"
+	"github.com/victorbillyph/fvremote/internal/update"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 // App é o backend exposto ao frontend (webview).
 type App struct {
@@ -38,6 +40,9 @@ type App struct {
 
 	mu       sync.Mutex
 	sessions map[string]*supportSession
+
+	history *historyStore
+	upd     *update.Info
 }
 
 // Info descreve este dispositivo.
@@ -59,7 +64,8 @@ type FileItem struct {
 
 func NewApp() *App {
 	n, h := profile()
-	return &App{name: n, host: h, sessions: map[string]*supportSession{}}
+	_ = config.EnsureBase()
+	return &App{name: n, host: h, sessions: map[string]*supportSession{}, history: loadHistory()}
 }
 
 func profile() (name, host string) {
@@ -277,9 +283,9 @@ func (a *App) Move(code string, x, y int) {
 	}
 }
 
-func (a *App) Click(code string, left, down bool) {
+func (a *App) Click(code string, left, down bool, x, y int) {
 	if s := a.session(code); s != nil && s.canControl() {
-		_ = s.rem.Click(s.id, left, down)
+		_ = s.rem.Click(s.id, left, down, x, y)
 	}
 }
 
@@ -393,4 +399,43 @@ func (a *App) DisconnectIncoming(id string) {
 	if a.hub != nil {
 		a.hub.Disconnect(id)
 	}
+}
+
+// ---- Histórico de clientes ----
+
+func (a *App) History() []HistoryItem { return a.history.list() }
+
+func (a *App) ForgetClient(code string) { a.history.forget(code) }
+
+// ---- Atualizações ----
+
+func (a *App) CheckUpdate() (*update.Info, error) {
+	socks := ""
+	if a.tor != nil {
+		socks = a.tor.SocksAddr()
+	}
+	info, err := update.Check(version, socks)
+	if err != nil {
+		return nil, err
+	}
+	a.upd = info
+	return info, nil
+}
+
+func (a *App) DoUpdate() error {
+	if a.upd == nil || !a.upd.Available {
+		return fmt.Errorf("nenhuma atualização disponível")
+	}
+	socks := ""
+	if a.tor != nil {
+		socks = a.tor.SocksAddr()
+	}
+	if err := update.Apply(a.upd, socks); err != nil {
+		return err
+	}
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		_ = update.Restart()
+	}()
+	return nil
 }

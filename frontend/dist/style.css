@@ -144,6 +144,32 @@ input[type=text]:focus { border-color: var(--primary); }
 .modal-card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px; width: 440px; max-width: 92%; }
 .modal-card h3 { margin-top: 0; }
 
+/* ---- cursor overlay ---- */
+.cursor {
+  position: absolute; width: 14px; height: 14px; margin: -2px 0 0 -2px;
+  pointer-events: none; z-index: 5;
+  background: radial-gradient(circle at 30% 30%, #fff, #4f8cff 70%);
+  border: 1.5px solid #0b1020; border-radius: 50%;
+  box-shadow: 0 0 8px #4f8cffaa, 0 0 2px #000;
+}
+
+/* ---- updates ---- */
+.update-banner { display: flex; align-items: center; gap: 10px; margin-right: 14px; }
+.update-banner .btn { padding: 6px 12px; }
+
+/* ---- history ---- */
+.hist-item {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 14px; margin: 8px 0; cursor: pointer;
+}
+.hist-item:hover { border-color: var(--primary); }
+.hist-item .info { flex: 1; }
+.hist-item .info b { display: block; }
+.hist-item .info span { color: var(--muted); font-size: 12px; }
+.hist-item .forget { color: var(--muted); }
+.hist-item .forget:hover { color: var(--err); }
+
 /* ---- toast ---- */
 #toasts { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 60; }
 .toast { background: var(--field); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; }

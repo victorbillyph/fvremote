@@ -161,8 +161,11 @@ func (s *supportSession) poll() {
 			s.mu.Lock()
 			start := !s.streaming
 			s.streaming = true
+			name := s.clientName
+			host := s.clientHost
 			s.mu.Unlock()
 			if start {
+				s.app.history.record(s.code, name, host)
 				go s.runStream()
 			}
 		}
