@@ -3,23 +3,22 @@
 tidy:
 	go mod tidy
 
+# Compila o app (Wails embute o frontend em frontend/dist)
 build:
-	go build ./...
+	wails build -s -skipbindings -m -nosyncgomod -tags webkit2_41
+
+linux: build
+
+# No Windows, execute nativamente (o Wails não faz cross-compile):
+windows:
+	wails build -s -skipbindings -m -nosyncgomod
+
+run:
+	go run -tags "desktop,production,webkit2_41" .
 
 test:
-	go test ./...
+	go test ./internal/identity/ ./internal/hub/
 
 # Teste ponta-a-ponta real (sobe Tor e conecta via onion). Requer rede.
 e2e:
 	go test -tags e2e -run TestEndToEnd -v -timeout 300s ./internal/e2e/
-
-run:
-	go run ./cmd/fvremote
-
-linux:
-	mkdir -p bin
-	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/fvremote-linux ./cmd/fvremote
-
-windows:
-	mkdir -p bin
-	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -trimpath -o bin/fvremote.exe ./cmd/fvremote

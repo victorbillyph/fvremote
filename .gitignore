@@ -1,7 +1,10 @@
-bin/
-dist/
-release/
-fyne-cross/
+/bin/
+/build/
+/dist/
+/release/
+/fyne-cross/
+frontend/wailsjs/
+frontend/node_modules/
 Icon.png
 *.exe
 *.log

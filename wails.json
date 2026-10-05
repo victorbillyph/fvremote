@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "fvremote",
+  "outputfilename": "fvremote",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Victor Billyph",
+    "email": "135908100+victorbillyph@users.noreply.github.com"
+  }
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fvremote</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="setup" class="setup">
+  <div class="setup-card">
+    <div class="logo">fvremote</div>
+    <div class="sub">acesso remoto descentralizado via Tor</div>
+    <div class="bar"><div id="setupBar"></div></div>
+    <div id="setupMsg" class="muted">Iniciando…</div>
+  </div>
+</div>
+
+<div id="main" class="hidden">
+  <header class="top">
+    <div class="brand">fvremote</div>
+    <div class="tor"><span class="dot"></span><span id="torLabel">online</span></div>
+  </header>
+  <nav id="tabs" class="tabs"></nav>
+  <main id="views" class="views"></main>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="modalTitle">Solicitação de conexão</h3>
+    <p id="modalMsg"></p>
+    <div class="row end">
+      <button id="modalReject" class="btn ghost">Rejeitar</button>
+      <button id="modalAccept" class="btn primary">Aceitar</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

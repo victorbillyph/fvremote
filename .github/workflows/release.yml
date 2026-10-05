@@ -33,43 +33,38 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install Linux dependencies
+      - name: Install Linux dependencies (GTK + WebKit2GTK)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libxtst-dev libx11-dev libxrandr-dev libxcursor-dev libxinerama-dev \
-            libxi-dev libxfixes-dev libwayland-dev wayland-protocols libdecor-0-dev
+            gcc pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libx11-dev libxtst-dev libxrandr-dev libxcursor-dev \
+            libxinerama-dev libxi-dev libxfixes-dev
 
-      - name: Download modules
+      - name: Install Wails
         shell: bash
-        run: go mod download
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
 
       - name: Build
         shell: bash
         env:
           CGO_ENABLED: '1'
         run: |
-          mkdir -p dist
-          SUF=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then SUF=".exe"; fi
-          go build -trimpath -o "dist/fvremote${SUF}" ./cmd/fvremote
-          ls -lh dist
+          TAGS=""
+          if [ "${{ matrix.goos }}" = "linux" ]; then TAGS="-tags webkit2_41"; fi
+          "$(go env GOPATH)/bin/wails" build -s -skipbindings -m -nosyncgomod $TAGS
+          ls -lh build/bin
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
-        run: |
-          tar -czf "${{ matrix.asset }}.tar.gz" -C dist fvremote
-          ls -lh "${{ matrix.asset }}".*
+        run: tar -czf "${{ matrix.asset }}.tar.gz" -C build/bin fvremote
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          Compress-Archive -Path dist/fvremote.exe -DestinationPath "${{ matrix.asset }}.zip"
-          Get-Item "${{ matrix.asset }}.zip" | Format-List
+        run: Compress-Archive -Path build/bin/fvremote.exe -DestinationPath "${{ matrix.asset }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
