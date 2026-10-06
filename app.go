@@ -24,7 +24,7 @@ import (
 	"github.com/victorbillyph/fvremote/internal/tray"
 )
 
-const version = "0.7.2"
+const version = "0.7.6"
 
 // App é o backend exposto ao frontend (webview).
 type App struct {
