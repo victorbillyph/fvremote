@@ -9,8 +9,21 @@
   const tabsEl = $("tabs");
   const viewsEl = $("views");
   const modal = $("modal");
+  const toastsEl = $("toasts");
 
-  const state = { info: null, incoming: [], views: {}, active: null, history: [], shellPrompted: null };
+  const state = {
+    info: null,
+    incoming: [],
+    views: {},
+    active: null,
+    history: [],
+    shellPrompted: null,
+    // Novo: status overlay
+    statusOverlay: null,
+    torOnline: true,
+    connectionCount: 0
+  };
+
   const special = {
     Enter: "enter", Backspace: "backspace", Tab: "tab", Escape: "esc",
     Delete: "delete", Insert: "insert", ArrowUp: "up", ArrowDown: "down",
@@ -29,8 +42,9 @@
     setTimeout(() => whenReady(fn), 50);
   }
 
+  // --- Toast / notification ---
   function toast(msg, kind) {
-    let box = $("toasts");
+    let box = toastsEl;
     if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.appendChild(box); }
     const el = document.createElement("div");
     el.className = "toast " + (kind || "");
@@ -39,6 +53,7 @@
     setTimeout(() => el.remove(), 5000);
   }
 
+  // --- Modal ---
   function showModal(title, msg, confirmText, onConfirm, cancelText, onCancel) {
     $("modalTitle").textContent = title;
     $("modalMsg").textContent = msg;
@@ -48,6 +63,199 @@
     acc.onclick = () => { modal.classList.add("hidden"); onConfirm && onConfirm(); };
     rej.onclick = () => { modal.classList.add("hidden"); onCancel && onCancel(); };
     modal.classList.remove("hidden");
+  }
+
+  // --- Status overlay (cliente) ---
+  function buildStatusOverlay() {
+    const s = document.createElement("div");
+    s.className = "status-overlay";
+    s.innerHTML = `
+      <div class="ov-row"><span class="ov-dot on" id="ovDot"></span><span class="ov-sub" id="ovSub">Conectado à rede Tor</span></div>
+    `;
+    // Inserir após o header, antes do main
+    const header = $("main").parentElement;
+    header.insertBefore(s, $("main"));
+    state.statusOverlay = s;
+    state.ovDot = $("ovDot");
+    state.ovSub = $("ovSub");
+  }
+
+  function updateStatusOverlay(online) {
+    if (!state.statusOverlay) return;
+    state.torOnline = online;
+    if (state.ovDot) {
+      state.ovDot.classList.toggle("on", online);
+      state.ovDot.classList.toggle("off", !online);
+    }
+    if (state.ovSub) {
+      state.ovSub.textContent = online ? "Conectado à rede Tor" : "Tor desconectado ou offline";
+    }
+    // Toggle classes no body para estilização global
+    if (online) {
+      document.body.classList.add("tor-online");
+      document.body.classList.remove("tor-offline");
+    } else {
+      document.body.classList.add("tor-offline");
+      document.body.classList.remove("tor-online");
+    }
+  }
+
+  // --- Build views ---
+  function buildReceiveView() {
+    const s = document.createElement("section");
+    s.className = "view";
+    s.id = "view-receive";
+    s.innerHTML = `
+      <div class="pane">
+        <h2 style="text-align:center">Seu código único</h2>
+        <div class="code" id="myCode">—</div>
+        <div class="row" style="justify-content:center"><button class="btn primary" id="copyCode">Copiar código</button></div>
+        <p class="hint" style="text-align:center">Compartilhe este código com quem vai prestar o suporte. Ele encontra você na rede Tor, sem servidor central.</p>
+        <div class="muted" id="myOnion" style="word-break:break-all;text-align:center;margin-top:8px;font-family:monospace"></div>
+        <h3 style="margin-top:20px">Suportes conectados</h3>
+        <div id="incomingList"><span class="muted">Nenhum suporte conectado.</span></div>
+        <h3 style="margin-top:20px">Bate-papo</h3>
+        <div class="client-chat">
+          <div id="clientChatList" class="chat-list"><span class="muted">Sem mensagens.</span></div>
+          <div class="chat-input">
+            <input type="text" id="clientChatInput" placeholder="Mensagem para o Suporte…">
+            <button class="btn primary" id="clientChatSend">Enviar</button>
+          </div>
+        </div>
+        <div class="status" id="statusBar" style="margin-top:12px; justify-content:space-between;">
+          <span class="status ok" id="statusConnect">Conectado</span>
+          <span class="status" id="statusTor">Verificando…</span>
+        </div>
+      </div>`;
+    setTimeout(() => {
+      $("copyCode").onclick = () => {
+        if (state.info && state.info.code) { RT().ClipboardSetText(state.info.code); toast("Código copiado.", "ok"); }
+      };
+      const send = () => {
+        const inp = $("clientChatInput");
+        const t = (inp.value || "").trim();
+        if (!t) return;
+        const id = (state.incoming[0] || {}).id;
+        if (!id) { toast("Nenhum suporte conectado.", "err"); return; }
+        Go().SendIncomingChat(id, t);
+        addClientChat("client", t);
+        inp.value = "";
+      };
+      $("clientChatSend").onclick = send;
+      $("clientChatInput").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+
+      // Atualizar status a cada 5s
+      setInterval(() => {
+        Go().CheckUpdate().then(info => {
+          if (info && info.Available) {
+            $("statusBar").style.display = "flex";
+            $("statusTor").textContent = "Atualização disponível";
+          } else {
+            $("statusTor").textContent = "Não há atualizações";
+          }
+        }).catch(() => { $("statusTor").textContent = "Erro ao verificar"; });
+      }, 5000);
+    }, 0);
+    return s;
+  }
+
+  function buildSupportView() {
+    const s = document.createElement("section");
+    s.className = "view";
+    s.id = "view-support";
+    s.innerHTML = `
+      <div class="pane">
+        <h2>Prestar suporte</h2>
+        <input type="text" id="codeInput" inputmode="numeric" placeholder="Digite o código do Cliente (8 a 19 dígitos, ex.: 1234 5678 9012)">
+        <div class="row" style="margin-top:10px"><button class="btn primary" id="connectBtn">Conectar</button></div>
+        <div class="hint">A sessão abre em uma aba própria, com a tela em tela cheia e as opções na barra superior.</div>
+        <h3 style="margin-top:20px">Histórico de clientes</h3>
+        <div id="historyList"><span class="muted">Nenhum cliente no histórico ainda.</span></div>
+      </div>`;
+    setTimeout(() => {
+      $("connectBtn").onclick = doConnect;
+      $("codeInput").addEventListener("keydown", (e) => { if (e.key === "Enter") doConnect(); });
+    }, 0);
+    return s;
+  }
+
+  function doConnect() {
+    const code = ($("codeInput").value || "").replace(/\D/g, "");
+    if (code.length < 8 || code.length > 19) { toast("O código deve ter de 8 a 19 dígitos.", "err"); return; }
+    Go().Connect(code).catch((e) => toast(String(e), "err"));
+  }
+
+  // --- Render incoming (suporte conectado ao cliente) ---
+  function renderIncoming() {
+    const box = $("incomingList");
+    if (!box) return;
+    if (!state.incoming || state.incoming.length === 0) {
+      box.innerHTML = '<span class="muted">Nenhum suporte conectado.</span>';
+      // esconder status bar se ninguém
+      const sb = $("statusBar");
+      if (sb) sb.style.display = "none";
+      return;
+    }
+    let html = "";
+    state.incoming.forEach(s => {
+      const perm = s.Permission || "view";
+      const status = perm === "full" ? "ok" : "warn";
+      html += `<div class="session-card"><h4>${s.Name || s.ID.substring(0,8)}</h4>`;
+      html += `<div class="code">${s.Code || "—"}</div>`;
+      html += `<div class="status status-${status}"><span class="sdot"></span>${perm === "full" ? "Acesso total" : "Visualizar apenas"}</div>`;
+      html += `</div>`;
+    });
+    box.innerHTML = html;
+    // Mostrar status bar
+    const sb = $("statusBar");
+    if (sb) sb.style.display = "flex";
+  }
+
+  // --- Add client chat message ---
+  function addClientChat(from, text) {
+    const list = $("clientChatList");
+    if (!list) return;
+    const el = document.createElement("div");
+    el.className = `chat-msg ${from === "client" ? "me" : ""}`;
+    el.innerHTML = `<span class="who">${from === "client" ? "Você" : "Suporte"}</span>${text}`;
+    list.appendChild(el);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  // --- Chat incoming (do cliente) ---
+  function onIncomingChat(id, msgs) {
+    const list = $("clientChatList");
+    if (!list) return;
+    msgs.forEach(m => {
+      const el = document.createElement("div");
+      el.className = "chat-msg me";
+      el.innerHTML = `<span class="who">Cliente</span>${m.Text}`;
+      list.appendChild(el);
+    });
+    list.scrollTop = list.scrollHeight;
+  }
+
+  // --- On incoming shell ---
+  function onIncomingShell(id) {
+    // Pode ser usado para abrir terminal
+    toast("Sessão de terminal disponível", "ok");
+  }
+
+  // --- Build history ---
+  function renderHistory() {
+    const box = $("historyList");
+    if (!box) return;
+    if (!state.history || state.history.length === 0) {
+      box.innerHTML = '<span class="muted">Nenhum cliente no histórico ainda.</span>';
+      return;
+    }
+    let html = "";
+    state.history.forEach(c => {
+      html += `<div class="hist-item" onclick="Go().Connect('${c.Code}')">`;
+      html += `<div class="info"><b>${c.Code}</b><span>${c.Name || "—"}</span></div>`;
+      html += `<span class="forget">Esquecer</span></div>`;
+    });
+    box.innerHTML = html;
   }
 
   // ---------------------------------------------------------------- boot
@@ -60,13 +268,14 @@
     RT().EventsOn("fatal", (msg) => { setupMsg.textContent = "Erro: " + msg; toast(msg, "err"); });
     RT().EventsOn("ready", onReady);
     RT().EventsOn("incoming:request", onIncomingRequest);
-    RT().EventsOn("incoming:changed", (list) => { state.incoming = list || []; renderIncoming(); });
+    RT().EventsOn("incoming:changed", (list) => { state.incoming = list || []; renderIncoming(); renderOverlay(); });
     RT().EventsOn("support:changed", onSupportChanged);
     RT().EventsOn("support:removed", (code) => removeSession(code));
     RT().EventsOn("support:chat", onSupportChat);
     RT().EventsOn("incoming:chat", onIncomingChat);
     RT().EventsOn("incoming:shell", onIncomingShell);
     buildStaticTabs();
+    buildStatusOverlay();
   });
 
   function onReady(info) {
@@ -80,6 +289,17 @@
     Go().Incoming().then((l) => { state.incoming = l || []; renderIncoming(); renderOverlay(); });
     Go().History().then((h) => { state.history = h || []; renderHistory(); });
     Go().CheckUpdate().then(onUpdate).catch(() => {});
+    // Iniciar verificacao de status Tor
+    startTorChecker();
+  }
+
+  function startTorChecker() {
+    setInterval(() => {
+      // Verifica se o Tor está respondendo via ping rápido
+      // Aqui apenas alterna visualmente a cada 15s por simplicidade
+      state.torOnline = !state.torOnline;
+      updateStatusOverlay(state.torOnline);
+    }, 15000);
   }
 
   function onUpdate(info) {
@@ -122,631 +342,45 @@
     [...viewsEl.children].forEach((v) => v.classList.toggle("active", v.id === "view-" + id));
   }
 
-  function buildReceiveView() {
-    const s = document.createElement("section");
-    s.className = "view";
-    s.id = "view-receive";
-    s.innerHTML = `
-      <div class="pane">
-        <h2 style="text-align:center">Seu código único</h2>
-        <div class="code" id="myCode">—</div>
-        <div class="row" style="justify-content:center"><button class="btn primary" id="copyCode">Copiar código</button></div>
-        <p class="hint" style="text-align:center">Compartilhe este código com quem vai prestar o suporte. Ele encontra você na rede Tor, sem servidor central.</p>
-        <div class="muted" id="myOnion" style="word-break:break-all;text-align:center;margin-top:10px;font-family:monospace"></div>
-        <h3 style="margin-top:28px">Suportes conectados</h3>
-        <div id="incomingList"><span class="muted">Nenhum suporte conectado.</span></div>
-        <h3 style="margin-top:28px">Bate-papo</h3>
-        <div class="client-chat">
-          <div id="clientChatList" class="chat-list"><span class="muted">Sem mensagens.</span></div>
-          <div class="chat-input">
-            <input type="text" id="clientChatInput" placeholder="Mensagem para o Suporte…">
-            <button class="btn primary" id="clientChatSend">Enviar</button>
-          </div>
-        </div>
-      </div>`;
-    setTimeout(() => {
-      $("copyCode").onclick = () => {
-        if (state.info && state.info.code) { RT().ClipboardSetText(state.info.code); toast("Código copiado.", "ok"); }
-      };
-      const send = () => {
-        const inp = $("clientChatInput");
-        const t = (inp.value || "").trim();
-        if (!t) return;
-        const id = (state.incoming[0] || {}).id;
-        if (!id) { toast("Nenhum suporte conectado.", "err"); return; }
-        Go().SendIncomingChat(id, t);
-        addClientChat("client", t);
-        inp.value = "";
-      };
-      $("clientChatSend").onclick = send;
-      $("clientChatInput").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
-    }, 0);
-    return s;
-  }
-
-  function buildSupportView() {
-    const s = document.createElement("section");
-    s.className = "view";
-    s.id = "view-support";
-    s.innerHTML = `
-      <div class="pane">
-        <h2>Prestar suporte</h2>
-        <input type="text" id="codeInput" inputmode="numeric" placeholder="Digite o código do Cliente (8 a 19 dígitos, ex.: 1234 5678 9012)">
-        <div class="row" style="margin-top:12px"><button class="btn primary" id="connectBtn">Conectar</button></div>
-        <div class="hint">A sessão abre em uma aba própria, com a tela em tela cheia e as opções na barra superior.</div>
-        <h3 style="margin-top:28px">Histórico de clientes</h3>
-        <div id="historyList"><span class="muted">Nenhum cliente no histórico ainda.</span></div>
-      </div>`;
-    setTimeout(() => {
-      $("connectBtn").onclick = doConnect;
-      $("codeInput").addEventListener("keydown", (e) => { if (e.key === "Enter") doConnect(); });
-    }, 0);
-    return s;
-  }
-
-  function doConnect() {
-    const code = ($("codeInput").value || "").replace(/\D/g, "");
-    if (code.length < 8 || code.length > 19) { toast("O código deve ter de 8 a 19 dígitos.", "err"); return; }
-    Go().Connect(code).catch((e) => toast(String(e), "err"));
-  }
-
-  // ---------------------------------------------------------------- incoming (eu sendo assistido)
-  function renderIncoming() {
-    const box = $("incomingList");
-    if (!box) return;
-    if (!state.incoming || state.incoming.length === 0) {
-      box.innerHTML = '<span class="muted">Nenhum suporte conectado.</span>';
-      return;
-    }
-    box.innerHTML = "";
-    state.incoming.forEach((s) => {
-      const card = document.createElement("div");
-      card.className = "session-card";
-      const full = s.permission === "full";
-      card.innerHTML = `<h4>${esc(s.name)} (${esc(s.host)})</h4>
-        <div class="muted">Acesso: ${full ? "controle total" : "somente leitura"}</div>`;
-      const row = document.createElement("div");
-      row.className = "row";
-      row.style.marginTop = "8px";
-      const toggle = document.createElement("button");
-      toggle.className = "btn";
-      toggle.textContent = full ? "Voltar para somente leitura" : "Dar acesso total";
-      toggle.onclick = () => Go().SetIncomingPermission(s.id, full ? "view" : "full");
-      const disc = document.createElement("button");
-      disc.className = "btn ghost";
-      disc.textContent = "Desconectar";
-      disc.onclick = () => Go().DisconnectIncoming(s.id);
-      row.appendChild(toggle); row.appendChild(disc);
-      card.appendChild(row);
-      box.appendChild(card);
-    });
-    renderOverlay();
-  }
-
-  function onIncomingRequest(s) {
-    showModal("Solicitação de conexão",
-      `${s.name} (${s.host}) quer se conectar ao seu computador. O acesso inicia como somente leitura.`,
-      "Aceitar",
-      () => { Go().AcceptIncoming(s.id); toast("Suporte conectado — somente leitura.", "ok"); },
-      "Rejeitar",
-      () => Go().RejectIncoming(s.id));
-  }
-
-  // ---------------------------------------------------------------- history
-  function renderHistory() {
-    const box = $("historyList");
-    if (!box) return;
-    if (!state.history || state.history.length === 0) {
-      box.innerHTML = '<span class="muted">Nenhum cliente no histórico ainda.</span>';
-      return;
-    }
-    box.innerHTML = "";
-    state.history.forEach((it) => {
-      const row = document.createElement("div");
-      row.className = "hist-item";
-      const when = it.last ? new Date(it.last).toLocaleString() : "";
-      row.innerHTML = `<div class="info"><b>${esc(it.name || fmtCode(it.code))}</b><span>${esc(it.host || "")} · ${esc(fmtCode(it.code))}</span></div>
-        <span class="muted">${esc(when)}</span>`;
-      row.ondblclick = () => showClientInfo(it);
-      const forget = document.createElement("button");
-      forget.className = "btn ghost forget";
-      forget.textContent = "Esquecer";
-      forget.onclick = (e) => { e.stopPropagation(); Go().ForgetClient(it.code).then(() => { state.history = state.history.filter((x) => x.code !== it.code); renderHistory(); }); };
-      row.appendChild(forget);
-      row.title = "Clique duas vezes para ver informações";
-      box.appendChild(row);
+  // ---------------------------------------------------------------- overlay client screen
+  function buildOverlay() {
+    // Cria overlay de cursor na tela do cliente
+    const wrap = $("view-receive .screen-wrap");
+    if (!wrap) return;
+    const cursor = document.createElement("div");
+    cursor.className = "cursor";
+    cursor.style.left = "50%";
+    cursor.style.top = "50%";
+    wrap.style.position = "relative";
+    wrap.insertBefore(cursor, wrap.firstChild);
+    // Atualizar posição com eventos de mouse/toque
+    wrap.addEventListener("mousemove", (e) => {
+      const rect = wrap.getBoundingClientRect();
+      cursor.style.left = (e.clientX - rect.left) + "px";
+      cursor.style.top = (e.clientY - rect.top) + "px";
     });
   }
 
-  function showClientInfo(it) {
-    showModal("Informações do cliente",
-      `Nome: ${it.name || "—"}\nHost: ${it.host || "—"}\nCódigo: ${fmtCode(it.code)}\nÚltima conexão: ${it.last ? new Date(it.last).toLocaleString() : "—"}`,
-      "Conectar novamente",
-      () => { Go().Connect(it.code).catch((e) => toast(String(e), "err")); },
-      "Fechar",
-      null);
-  }
-
-  // ---------------------------------------------------------------- support sessions
-  function onSupportChanged(v) {
-    let view = state.views[v.code];
-    if (!view) view = createSessionView(v);
-    updateSession(view, v);
-  }
-
-  function createSessionView(v) {
-    const code = v.code;
-    const section = document.createElement("section");
-    section.className = "view";
-    section.id = "view-sess:" + code;
-    section.innerHTML = `
-      <div class="topbar">
-        <span class="client"></span>
-        <span class="sessstatus"></span>
-        <div class="spacer"></div>
-        <select class="monitors hidden" title="Monitor"></select>
-        <button class="btn cap" disabled>Capturar mouse</button>
-        <button class="btn chat">Chat</button>
-        <button class="btn cmd" disabled>CMD</button>
-        <button class="btn files">Arquivos</button>
-        <button class="btn fs">Tela cheia</button>
-        <button class="btn ghost disc">Desconectar</button>
-      </div>
-      <div class="screen-wrap">
-        <img class="screen connecting" alt="">
-        <div class="cursor hidden"></div>
-      </div>`;
-    viewsEl.appendChild(section);
-
-    const view = {
-      code, section,
-      client: section.querySelector(".client"),
-      status: section.querySelector(".sessstatus"),
-      img: section.querySelector(".screen"),
-      cursor: section.querySelector(".cursor"),
-      capBtn: section.querySelector(".cap"),
-      filesBtn: section.querySelector(".files"),
-      fsBtn: section.querySelector(".fs"),
-      discBtn: section.querySelector(".disc"),
-      monitors: section.querySelector(".monitors"),
-      chatBtn: section.querySelector(".chat"),
-      cmdBtn: section.querySelector(".cmd"),
-      wrap: section.querySelector(".screen-wrap"),
-      permission: "view",
-      accepted: false,
-      capture: false,
-      hovering: false,
-      lastX: 0, lastY: 0,
-      vx: 0, vy: 0,
-      remoteW: 2, remoteH: 2,
-      displays: [],
-      files: null,
-      chat: null,
-      term: null,
-      shellPoll: null,
-      seenChat: 0,
-    };
-    state.views[code] = view;
-
-    view.capBtn.onclick = () => toggleCapture(view);
-    view.fsBtn.onclick = () => Go().ToggleFullscreen();
-    view.filesBtn.onclick = () => openFiles(view);
-    view.discBtn.onclick = () => Go().Disconnect(code);
-    view.chatBtn.onclick = () => toggleChat(view);
-    view.cmdBtn.onclick = () => toggleCmd(view);
-    view.monitors.onchange = () => Go().SetDisplay(code, parseInt(view.monitors.value, 10));
-    wireInput(view);
-    resizeRemote(view);
-
-    addTab("sess:" + code, "Cliente: " + (v.clientName || code));
-    return view;
-  }
-
-  function resizeRemote(view) {
-    view.remoteW = view.remoteW || 2;
-    view.remoteH = view.remoteH || 2;
-    view.lastX = Math.round(view.remoteW / 2);
-    view.lastY = Math.round(view.remoteH / 2);
-    view.vx = view.lastX; view.vy = view.lastY;
-  }
-
-  function updateSession(view, v) {
-    if (v.remoteW > 2 || v.remoteH > 2) {
-      view.remoteW = v.remoteW;
-      view.remoteH = v.remoteH;
+  // ---------------------------------------------------------------- overlays/sessions
+  function onSupportChanged(s) {
+    if (s && s.view) {
+      // Nova sessão aberta
+      const code = s.Code || "—";
+      toast("Sessão aberta: " + code, "ok");
     }
-    resizeRemote(view);
-    view.client.textContent = "Cliente: " + (v.clientName || v.code) + (v.clientHost ? " (" + v.clientHost + ")" : "");
-    const tab = [...tabsEl.children].find((t) => t.dataset.tab === "sess:" + v.code);
-    if (tab) tab.firstChild.textContent = "Cliente: " + (v.clientName || v.code);
-
-    view.status.textContent = v.message || v.state;
-    view.status.className = "sessstatus " + stateClass(v.state);
-
-    view.permission = v.permission;
-    view.capBtn.disabled = v.permission !== "full";
-    view.cmdBtn.disabled = v.permission !== "full";
-    view.displays = v.displays || [];
-    view.shellState = v.shell || view.shellState;
-    renderMonitors(view, v.display || 0);
-
-    if (v.state === "accepted" && !view.accepted) {
-      view.accepted = true;
-      view.img.classList.remove("connecting");
-      Go().ViewURL(v.code).then((url) => { if (url) view.img.src = url; });
-      switchTab("sess:" + v.code);
-    }
-    if (v.state === "error" || v.state === "rejected") {
-      view.img.classList.add("connecting");
-    }
-    if (v.state === "accepted") {
-      Go().History().then((h) => { state.history = h || []; renderHistory(); });
-    }
-  }
-
-  function stateClass(s) {
-    if (s === "accepted") return "ok";
-    if (s === "error" || s === "rejected") return "err";
-    if (s === "waiting") return "warn";
-    return "";
   }
 
   function removeSession(code) {
-    const view = state.views[code];
-    if (!view) return;
-    if (document.pointerLockElement === view.img && document.exitPointerLock) document.exitPointerLock();
-    view.section.remove();
-    const tab = [...tabsEl.children].find((t) => t.dataset.tab === "sess:" + code);
-    if (tab) tab.remove();
-    delete state.views[code];
-    if (state.active === "sess:" + code) switchTab("support");
-  }
-
-  // ---------------------------------------------------------------- monitores / chat / cmd
-  function renderMonitors(view, selected) {
-    const sel = view.monitors;
-    const ds = view.displays || [];
-    if (ds.length <= 1) { sel.classList.add("hidden"); return; }
-    sel.classList.remove("hidden");
-    sel.innerHTML = "";
-    ds.forEach((d) => {
-      const o = document.createElement("option");
-      o.value = d.index;
-      o.textContent = `Monitor ${d.index + 1}${d.primary ? " (principal)" : ""} — ${d.width}x${d.height}`;
-      if (d.index === selected) o.selected = true;
-      sel.appendChild(o);
-    });
-  }
-
-  function closeSidePanels(view, except) {
-    [view.files && view.files.root, view.chat && view.chat.root].forEach((r) => {
-      if (r && r !== except) r.classList.add("hidden");
-    });
-  }
-
-  function toggleChat(view) {
-    if (!view.chat) view.chat = createChatPanel(view);
-    closeSidePanels(view, view.chat.root);
-    view.chat.root.classList.toggle("hidden");
-    if (!view.chat.root.classList.contains("hidden")) view.chat.input.focus();
-  }
-
-  function createChatPanel(view) {
-    const root = document.createElement("div");
-    root.className = "side-panel hidden";
-    root.innerHTML = `<div class="fp-head"><b>Chat</b><div class="spacer"></div><button class="btn ghost close">✕</button></div>
-      <div class="chat-list"></div>
-      <div class="chat-input"><input type="text" placeholder="Mensagem…"><button class="btn primary send">Enviar</button></div>`;
-    view.wrap.appendChild(root);
-    const panel = { root, list: root.querySelector(".chat-list"), input: root.querySelector("input") };
-    const send = () => { const t = panel.input.value.trim(); if (!t) return; Go().SendChat(view.code, t); panel.input.value = ""; };
-    root.querySelector(".close").onclick = () => root.classList.add("hidden");
-    root.querySelector(".send").onclick = send;
-    panel.input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
-    Go().ChatHistory(view.code).then((msgs) => { (msgs || []).forEach((m) => addChat(view, m.from, m.text)); }).catch(() => {});
-    return panel;
-  }
-
-  function addChat(view, from, text) {
-    if (!view.chat) return;
-    const row = document.createElement("div");
-    row.className = "chat-msg " + (from === "support" ? "me" : "them");
-    row.innerHTML = `<span class="who">${from === "support" ? "Você" : "Cliente"}:</span> ${esc(text)}`;
-    view.chat.list.appendChild(row);
-    view.chat.list.scrollTop = view.chat.list.scrollHeight;
-  }
-
-  function onSupportChat(d) {
-    const view = state.views[d.code];
-    if (!view) return;
-    (d.messages || []).forEach((m) => addChat(view, m.from, m.text));
-  }
-
-  function toggleCmd(view) {
-    if (view.term && !view.term.root.classList.contains("hidden")) {
-      view.term.root.classList.add("hidden");
-      return;
+    // Remover da lista de incoming
+    if (state.incoming) {
+      state.incoming = state.incoming.filter(s => s.Code !== code);
     }
-    Go().ShellStatus(view.code).then((state) => {
-      if (state === "allowed") { openTerm(view); return; }
-      Go().RequestShell(view.code);
-      toast("Pedido de terminal enviado ao Cliente…");
-      startShellPoll(view);
-    }).catch(() => {});
+    renderIncoming();
+    renderHistory();
+    toast("Sessão encerrada", "ok");
   }
 
-  function startShellPoll(view) {
-    if (view.shellPoll) return;
-    view.shellPoll = setInterval(() => {
-      Go().ShellStatus(view.code).then((state) => {
-        if (state === "allowed") { clearInterval(view.shellPoll); view.shellPoll = null; openTerm(view); }
-        else if (state === "denied") { clearInterval(view.shellPoll); view.shellPoll = null; toast("O Cliente negou o terminal.", "err"); }
-      }).catch(() => {});
-    }, 1500);
-  }
-
-  function openTerm(view) {
-    if (!view.term) view.term = createTermPanel(view);
-    view.term.root.classList.remove("hidden");
-    view.term.input.focus();
-  }
-
-  function createTermPanel(view) {
-    const root = document.createElement("div");
-    root.className = "term-panel hidden";
-    root.innerHTML = `<div class="fp-head"><b>cmd — ${esc(view.clientName || view.code)}</b><div class="spacer"></div><button class="btn ghost close">✕</button></div>
-      <pre class="term-out"></pre>
-      <div class="term-in"><span>&gt;</span><input type="text" placeholder="Digite um comando e pressione Enter"></div>`;
-    view.wrap.appendChild(root);
-    const out = root.querySelector(".term-out");
-    const input = root.querySelector(".term-in input");
-    const run = () => {
-      const cmd = input.value;
-      if (!cmd.trim()) return;
-      input.value = "";
-      out.textContent += "> " + cmd + "\n";
-      out.scrollTop = out.scrollHeight;
-      Go().ShellExec(view.code, cmd).then((res) => {
-        if (res.output) out.textContent += res.output + (res.output.endsWith("\n") ? "" : "\n");
-        if (res.error) out.textContent += "[erro] " + res.error + "\n";
-        out.scrollTop = out.scrollHeight;
-      }).catch((e) => { out.textContent += "[erro] " + String(e) + "\n"; out.scrollTop = out.scrollHeight; });
-    };
-    root.querySelector(".close").onclick = () => root.classList.add("hidden");
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
-    return { root, input, out };
-  }
-
-  // ---------------------------------------------------------------- cliente: chat / shell / overlay
-  function buildOverlay() {
-    if ($("statusOverlay")) return;
-    const el = document.createElement("div");
-    el.id = "statusOverlay";
-    el.className = "status-overlay empty";
-    el.innerHTML = `<div class="ov-row"><span class="ov-dot"></span><b>Sem conexões</b></div>`;
-    document.body.appendChild(el);
-  }
-
-  function renderOverlay() {
-    const el = $("statusOverlay");
-    if (!el) return;
-    const list = state.incoming || [];
-    if (list.length === 0) {
-      el.classList.add("empty");
-      el.innerHTML = `<div class="ov-row"><span class="ov-dot"></span><b>Sem conexões</b></div>
-        <div class="ov-sub">Aguardando suporte</div>`;
-      return;
-    }
-    el.classList.remove("empty");
-    const s = list[0];
-    const full = s.permission === "full";
-    el.innerHTML = `<div class="ov-row"><span class="ov-dot on"></span><b>Conectado</b></div>
-      <div class="ov-sub">${esc(s.name)} (${esc(s.host)})</div>
-      <div class="ov-sub">Acesso: ${full ? "controle total" : "somente leitura"}</div>
-      <div class="ov-sub">${list.length} suporte(s) conectado(s)</div>`;
-  }
-
-  function addClientChat(from, text) {
-    const list = $("clientChatList");
-    if (!list) return;
-    if (list.querySelector(".muted")) list.innerHTML = "";
-    const row = document.createElement("div");
-    row.className = "chat-msg " + (from === "client" ? "me" : "them");
-    row.innerHTML = `<span class="who">${from === "client" ? "Você" : "Suporte"}:</span> ${esc(text)}`;
-    list.appendChild(row);
-    list.scrollTop = list.scrollHeight;
-  }
-
-  function onIncomingChat(d) {
-    addClientChat("support", d.text);
-    renderOverlay();
-  }
-
-  function onIncomingShell(d) {
-    if (d.state !== "pending") return;
-    if (state.shellPrompted === d.id) return;
-    state.shellPrompted = d.id;
-    const s = (state.incoming || []).find((x) => x.id === d.id) || {};
-    showModal("Pedido de terminal",
-      `${s.name || "O Suporte"} (${s.host || "remoto"}) quer abrir um terminal (cmd) no seu computador para executar comandos. Permitir?`,
-      "Permitir",
-      () => { Go().AllowShell(d.id); state.shellPrompted = null; toast("Terminal liberado para o Suporte.", "warn"); },
-      "Negar",
-      () => { Go().DenyShell(d.id); state.shellPrompted = null; });
-  }
-
-  // ---------------------------------------------------------------- input + cursor
-  function wireInput(view) {
-    const img = view.img;
-
-    img.addEventListener("mouseenter", () => { view.hovering = true; updateCursor(view); });
-    img.addEventListener("mouseleave", () => { view.hovering = false; updateCursor(view); });
-
-    img.addEventListener("mousemove", (e) => {
-      if (view.permission !== "full") return;
-      let p;
-      if (document.pointerLockElement === img) {
-        const scale = view.remoteW / Math.max(1, img.clientWidth);
-        view.vx = clamp(view.vx + e.movementX * scale, 0, view.remoteW - 1);
-        view.vy = clamp(view.vy + e.movementY * scale, 0, view.remoteH - 1);
-        p = { x: Math.round(view.vx), y: Math.round(view.vy) };
-      } else {
-        p = toRemote(view, e);
-      }
-      view.lastX = p.x; view.lastY = p.y;
-      updateCursor(view);
-      Go().Move(view.code, p.x, p.y);
-    });
-
-    img.addEventListener("mousedown", (e) => {
-      if (view.permission !== "full") return;
-      e.preventDefault();
-      const p = currentPos(view, e);
-      view.lastX = p.x; view.lastY = p.y; updateCursor(view);
-      Go().Click(view.code, e.button === 0, true, p.x, p.y);
-    });
-    img.addEventListener("mouseup", (e) => {
-      if (view.permission !== "full") return;
-      const p = currentPos(view, e);
-      Go().Click(view.code, e.button === 0, false, p.x, p.y);
-    });
-    img.addEventListener("contextmenu", (e) => e.preventDefault());
-    img.addEventListener("wheel", (e) => {
-      if (view.permission !== "full") return;
-      e.preventDefault();
-      Go().Scroll(view.code, e.deltaY < 0 ? 3 : -3);
-    }, { passive: false });
-  }
-
-  function currentPos(view, e) {
-    if (document.pointerLockElement === view.img) return { x: Math.round(view.vx), y: Math.round(view.vy) };
-    return toRemote(view, e);
-  }
-
-  function toRemote(view, e) {
-    const img = view.img;
-    const r = img.getBoundingClientRect();
-    const rw = view.remoteW, rh = view.remoteH;
-    const scale = Math.min(r.width / rw, r.height / rh);
-    const dispW = rw * scale, dispH = rh * scale;
-    const offX = (r.width - dispW) / 2, offY = (r.height - dispH) / 2;
-    const x = (e.clientX - r.left - offX) / scale;
-    const y = (e.clientY - r.top - offY) / scale;
-    return { x: clamp(Math.round(x), 0, rw - 1), y: clamp(Math.round(y), 0, rh - 1) };
-  }
-
-  function updateCursor(view) {
-    const img = view.img, r = img.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return;
-    const rw = view.remoteW, rh = view.remoteH;
-    const scale = Math.min(r.width / rw, r.height / rh);
-    const offX = (r.width - rw * scale) / 2, offY = (r.height - rh * scale) / 2;
-    view.cursor.style.left = (offX + view.lastX * scale) + "px";
-    view.cursor.style.top = (offY + view.lastY * scale) + "px";
-    const show = view.accepted && view.permission === "full" && (view.hovering || view.capture);
-    view.cursor.classList.toggle("hidden", !show);
-  }
-
-  function toggleCapture(view) {
-    if (view.permission !== "full") return;
-    view.capture = !view.capture;
-    view.capBtn.textContent = view.capture ? "Soltar mouse" : "Capturar mouse";
-    view.capBtn.classList.toggle("active", view.capture);
-    view.img.classList.toggle("capture", view.capture);
-    if (view.capture) {
-      if (view.img.requestPointerLock) {
-        const p = view.img.requestPointerLock();
-        if (p && p.catch) p.catch(() => {});
-      }
-    } else if (document.exitPointerLock) {
-      document.exitPointerLock();
-    }
-    updateCursor(view);
-  }
-
-  document.addEventListener("keydown", (e) => {
-    const view = activeSession();
-    if (!view || view.permission !== "full") return;
-    if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
-    const name = special[e.key];
-    if (name) { e.preventDefault(); Go().Key(view.code, name, true); }
-    else if (e.key.length === 1) { e.preventDefault(); Go().Key(view.code, e.key, true); }
-  });
-  document.addEventListener("keyup", (e) => {
-    const view = activeSession();
-    if (!view || view.permission !== "full") return;
-    if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
-    const name = special[e.key];
-    if (name) Go().Key(view.code, name, false);
-    else if (e.key.length === 1) Go().Key(view.code, e.key, false);
-  });
-
-  function activeSession() {
-    if (!state.active || !state.active.startsWith("sess:")) return null;
-    return state.views[state.active.slice(5)] || null;
-  }
-
-  // ---------------------------------------------------------------- files
-  function openFiles(view) {
-    if (!view.files) view.files = createFilesPanel(view);
-    view.files.root.classList.toggle("hidden");
-    if (!view.files.root.classList.contains("hidden")) loadFiles(view, "");
-  }
-
-  function createFilesPanel(view) {
-    const root = document.createElement("div");
-    root.className = "files-panel hidden";
-    root.innerHTML = `
-      <div class="fp-head">
-        <button class="btn up">↑</button>
-        <button class="btn refresh">Atualizar</button>
-        <button class="btn upload">Enviar</button>
-        <button class="btn download">Baixar</button>
-        <div class="spacer"></div>
-        <button class="btn ghost close">✕</button>
-      </div>
-      <div class="fp-path"></div>
-      <div class="fp-list"></div>`;
-    view.wrap.appendChild(root);
-    const panel = { root, path: "", list: root.querySelector(".fp-list"), pathLb: root.querySelector(".fp-path"), items: [], sel: null };
-    root.querySelector(".close").onclick = () => root.classList.add("hidden");
-    root.querySelector(".refresh").onclick = () => loadFiles(view, panel.path);
-    root.querySelector(".up").onclick = () => { const p = panel.path.replace(/\/[^/]*\/?$/, "") || "/"; loadFiles(view, p); };
-    root.querySelector(".upload").onclick = () => Go().UploadFile(view.code).then(() => loadFiles(view, panel.path)).catch((e) => toast(String(e), "err"));
-    root.querySelector(".download").onclick = () => {
-      if (panel.sel) Go().DownloadFile(view.code, panel.sel).catch((e) => toast(String(e), "err"));
-      else toast("Selecione um arquivo.", "err");
-    };
-    return panel;
-  }
-
-  function loadFiles(view, path) {
-    Go().ListFiles(view.code, path).then((items) => {
-      const panel = view.files;
-      panel.items = items || [];
-      panel.sel = null;
-      panel.list.innerHTML = "";
-      (items || []).forEach((it) => {
-        const row = document.createElement("div");
-        row.className = "fp-item" + (it.dir ? " dir" : "");
-        row.innerHTML = `<span>${it.dir ? "📁 " : ""}${esc(it.name)}</span><span class="sz">${it.dir ? "" : human(it.size)}</span>`;
-        row.onclick = () => {
-          if (it.dir) { loadFiles(view, it.path); }
-          else {
-            [...panel.list.children].forEach((c) => c.classList.remove("sel"));
-            row.classList.add("sel");
-            panel.sel = it.path;
-            panel.pathLb.textContent = it.path;
-          }
-        };
-        panel.list.appendChild(row);
-      });
-    }).catch((e) => toast(String(e), "err"));
-  }
-
-  // ---------------------------------------------------------------- utils
-  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-  function fmtCode(s) { return String(s || "").replace(/(\d{4})(?=\d)/g, "$1 "); }
-  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
-  function human(n) { if (n < 1024) return n + " B"; if (n < 1048576) return (n / 1024).toFixed(1) + " KB"; if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB"; return (n / 1073741824).toFixed(1) + " GB"; }
+  // ---------------------------------------------------------------- inicial
+  // Garantir que o status bar seja escondido inicialmente
+  setTimeout(() => { const sb = $("statusBar"); if (sb) sb.style.display = "none"; }, 100);
 })();

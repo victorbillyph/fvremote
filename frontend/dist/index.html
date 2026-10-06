@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
 <div id="setup" class="setup">
   <div class="setup-card">
     <div class="logo">fvremote</div>
@@ -20,11 +21,13 @@
   <header class="top">
     <div class="brand">fvremote</div>
     <div class="spacer"></div>
-    <div id="updateBanner" class="update-banner hidden">
-      <span id="updateText"></span>
-      <button class="btn primary" id="updateBtn">Atualizar</button>
+    <div class="toolbar">
+      <div class="tor"><span class="dot"></span><span id="torLabel">online</span></div>
+      <div class="update-banner hidden" id="updateBanner">
+        <span id="updateText"></span>
+        <button class="btn primary" id="updateBtn">Atualizar</button>
+      </div>
     </div>
-    <div class="tor"><span class="dot"></span><span id="torLabel">online</span></div>
   </header>
   <nav id="tabs" class="tabs"></nav>
   <main id="views" class="views"></main>
@@ -40,6 +43,8 @@
     </div>
   </div>
 </div>
+
+<div id="toasts"></div>
 
 <script src="app.js"></script>
 </body>
